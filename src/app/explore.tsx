@@ -1,6 +1,6 @@
 import { Image } from 'expo-image';
 import { SymbolView } from 'expo-symbols';
-import { Platform, Pressable, ScrollView, StyleSheet } from 'react-native';
+import { Platform, Pressable, StyleSheet } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { ExternalLink } from '@/components/external-link';
@@ -10,6 +10,7 @@ import { Collapsible } from '@/components/ui/collapsible';
 import { WebBadge } from '@/components/web-badge';
 import { BottomTabInset, MaxContentWidth, Spacing } from '@/constants/theme';
 import { useTheme } from '@/hooks/use-theme';
+import PullToRefreshScrollView from '@/components/pull-to-refresh-scroll-view';
 
 export default function TabTwoScreen() {
   const safeAreaInsets = useSafeAreaInsets();
@@ -33,7 +34,7 @@ export default function TabTwoScreen() {
   });
 
   return (
-    <ScrollView
+    <PullToRefreshScrollView
       style={[styles.scrollView, { backgroundColor: theme.background }]}
       contentInset={insets}
       contentContainerStyle={[styles.contentContainer, contentPlatformStyle]}>
@@ -121,7 +122,7 @@ export default function TabTwoScreen() {
         </ThemedView>
         {Platform.OS === 'web' && <WebBadge />}
       </ThemedView>
-    </ScrollView>
+    </PullToRefreshScrollView>
   );
 }
 

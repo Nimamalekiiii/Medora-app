@@ -1,7 +1,10 @@
+import { appColor } from '@/constants/adaptive-color';
 import { Platform, StyleSheet, Text, type TextProps } from 'react-native';
 
 import { Fonts, ThemeColor } from '@/constants/theme';
 import { useTheme } from '@/hooks/use-theme';
+import { useAppSettings } from '@/services/app-settings-context';
+import { tr } from '@/services/localization';
 
 export type ThemedTextProps = TextProps & {
   type?: 'default' | 'title' | 'small' | 'smallBold' | 'subtitle' | 'link' | 'linkPrimary' | 'code';
@@ -10,6 +13,8 @@ export type ThemedTextProps = TextProps & {
 
 export function ThemedText({ style, type = 'default', themeColor, ...rest }: ThemedTextProps) {
   const theme = useTheme();
+  const { preferences } = useAppSettings();
+  const children = typeof rest.children === 'string' ? tr(rest.children, preferences.language) : rest.children;
 
   return (
     <Text
@@ -26,7 +31,9 @@ export function ThemedText({ style, type = 'default', themeColor, ...rest }: The
         style,
       ]}
       {...rest}
-    />
+    >
+      {children}
+      </Text>
   );
 }
 
@@ -63,7 +70,7 @@ const styles = StyleSheet.create({
   linkPrimary: {
     lineHeight: 30,
     fontSize: 14,
-    color: '#3c87f7',
+    color: appColor('#3c87f7', 'text'),
   },
   code: {
     fontFamily: Fonts.mono,
