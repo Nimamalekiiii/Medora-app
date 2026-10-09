@@ -1,312 +1,239 @@
-import { LocalizedText as Text } from '@/components/localized-text';
+import { cardShadow } from '@/components/gloss';
+import { IconChip } from '@/components/study/icon-chip';
+import { ProgressBar } from '@/components/charts';
+import { ink, p, useProgressPalette } from '@/components/progress/theme';
+import PullToRefreshScrollView from '@/components/pull-to-refresh-scroll-view';
+import { Chips, PillButton, ScreenBar, SectionHeader, studyStyles } from '@/components/study/study-ui';
+import { TopicNotesField, useTopicNotes } from '@/components/study/topic-notes';
 import { StudyIcon } from '@/components/study-icon';
 import { appColor } from '@/constants/adaptive-color';
+import { ui } from '@/constants/ui';
+import { useStudyData } from '@/hooks/use-study-data';
+import { generateAIFlashcards } from '@/services/ai-api';
+import { useAppSettings } from '@/services/app-settings-context';
+import { isCardDue, type CardOrder } from '@/services/flashcard-session';
+import { getAIPreferences, saveFlashcards, type AIPreferences } from '@/services/storage';
+import { calculateTopicMastery } from '@/services/topic-mastery';
+import type { Flashcard } from '@/types/study';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import { Stack, router, useLocalSearchParams } from 'expo-router';
 import { useEffect, useState } from 'react';
 import {
-  ActivityIndicator,
-  Alert,
-  KeyboardAvoidingView,
-  Modal,
-  Platform,
-  Pressable,
-  ScrollView,
-  StyleSheet,
-  TextInput,
-  View,
+  ActivityIndicator, Alert, KeyboardAvoidingView, Modal, Platform, Pressable, ScrollView, StyleSheet, Switch, Text, TextInput, View,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import PullToRefreshScrollView from '../../../components/pull-to-refresh-scroll-view';
 
-import type {
-  Flashcard,
-  StudyActivity,
-} from '../../../types/study';
+const param = (value: string | string[] | undefined) => (Array.isArray(value) ? value[0] ?? '' : value ?? '');
+const SETTINGS_KEY = 'medexam_flashcard_session_settings';
+const COUNT_CHOICES = ['10', '20', '30', '0'] as const;
+const AI_COUNT_CHOICES = [10, 20, 30, 50];
+const PREVIEW_CARDS = 3;
 
-import {
-  getFlashcards,
-  getFlashcardsForTopic,
-  getAIPreferences,
-  getSubjects,
-  saveFlashcards,
-  addStudyActivity,
-} from '../../../services/storage';
-import { generateAIFlashcards } from '../../../services/ai-api';
+type SessionSettings = { count: string; order: CardOrder; answerFirst: boolean };
+const DEFAULT_SETTINGS: SessionSettings = { count: '10', order: 'smart', answerFirst: false };
 
+/** A topic's flashcards: what is due, how the cards are going, session settings, and the cards themselves. */
 export default function FlashcardsScreen() {
-  const { id, name, subjectId } = useLocalSearchParams();
+  const params = useLocalSearchParams<{ id?: string | string[]; name?: string | string[]; subjectId?: string | string[] }>();
+  const topicId = param(params.id);
+  const { preferences } = useAppSettings();
+  const language = preferences.language;
+  const L = (en: string, no: string) => (language === 'no' ? no : en);
+  const palette = useProgressPalette();
+  const { loading, data, metrics, reload } = useStudyData();
 
-  const topicId = String(id ?? '');
-  const subjectKey = Array.isArray(subjectId) ? subjectId[0] : String(subjectId ?? '');
-  const topicName = String(
-    name ?? 'Unknown topic'
-  );
+  const topic = metrics?.topics.find((item) => String(item.id) === topicId);
+  const topicName = topic?.name ?? (param(params.name) || L('Topic', 'Tema'));
+  const subjectId = topic?.subjectId ?? param(params.subjectId);
+  const subjectName = topic?.subjectName ?? '';
+  const cards = (data?.cards ?? []).filter((card) => String(card.topicId) === topicId);
 
-  const [flashcards, setFlashcards] =
-    useState<Flashcard[]>([]);
+  const [settings, setSettings] = useState<SessionSettings>(DEFAULT_SETTINGS);
+  const [showAll, setShowAll] = useState(false);
+  const [busy, setBusy] = useState(false);
 
-  const [currentIndex, setCurrentIndex] =
-    useState(0);
+  // Add / edit one card.
+  const [editorVisible, setEditorVisible] = useState(false);
+  const [editing, setEditing] = useState<Flashcard | null>(null);
+  const [front, setFront] = useState('');
+  const [back, setBack] = useState('');
+  const [editorError, setEditorError] = useState('');
 
-  const [showAnswer, setShowAnswer] =
-    useState(false);
-
-  const [sessionStartedAt] =
-    useState(Date.now());
-
-  const [sessionFinished, setSessionFinished] =
-    useState(false);
-
-  const [activitySaved, setActivitySaved] =
-    useState(false);
-
-  const [loading, setLoading] =
-    useState(true);
-
-  const [generatingAI, setGeneratingAI] = useState(false);
-  const [cardCount, setCardCount] = useState(10);
-  const [aiEnabled, setAIEnabled] = useState(true);
-  const [aiDifficulty, setAIDifficulty] = useState<'easy' | 'medium' | 'hard'>('medium');
-  const [aiExplanationStyle, setAIExplanationStyle] = useState<'short' | 'balanced' | 'detailed'>('balanced');
-  const [aiProgress, setAiProgress] = useState(0);
-  const [aiPromptVisible, setAiPromptVisible] = useState(false);
-  const [sourceMaterial, setSourceMaterial] = useState('');
-  const [aiPreviewVisible, setAIPreviewVisible] = useState(false);
-  const [aiDrafts, setAIDrafts] = useState<Flashcard[]>([]);
-
-  const [manageMode, setManageMode] =
-    useState(false);
-
-  const [modalVisible, setModalVisible] =
-    useState(false);
-
-  const [editingCard, setEditingCard] =
-    useState<Flashcard | null>(null);
-
-  const [frontText, setFrontText] =
-    useState('');
-
-  const [backText, setBackText] =
-    useState('');
+  // Generate with AI.
+  const [aiPreferences, setAIPreferences] = useState<AIPreferences | null>(null);
+  const [aiVisible, setAIVisible] = useState(false);
+  const [aiCount, setAICount] = useState(10);
+  const topicNotes = useTopicNotes(topicId);
+  const [generating, setGenerating] = useState(false);
+  const [generated, setGenerated] = useState(0);
+  const [drafts, setDrafts] = useState<Flashcard[] | null>(null);
+  const [aiError, setAIError] = useState('');
 
   useEffect(() => {
-    loadFlashcards();
-  }, [topicId]);
-
-  useEffect(() => {
-    void getAIPreferences().then((prefs) => {
-      setCardCount(prefs.flashcardCount);
-      setAIEnabled(prefs.generateFlashcards);
-      setAIDifficulty(prefs.difficulty);
-      setAIExplanationStyle(prefs.explanationStyle);
+    let active = true;
+    void AsyncStorage.getItem(SETTINGS_KEY).then((raw) => {
+      if (!active || !raw) return;
+      try {
+        const saved = JSON.parse(raw) as Partial<SessionSettings>;
+        setSettings({
+          count: COUNT_CHOICES.includes(saved.count as (typeof COUNT_CHOICES)[number]) ? String(saved.count) : DEFAULT_SETTINGS.count,
+          order: saved.order === 'ordered' || saved.order === 'shuffled' ? saved.order : 'smart',
+          answerFirst: saved.answerFirst === true,
+        });
+      } catch { /* Keep the defaults when the saved settings cannot be read. */ }
     });
+    void getAIPreferences().then((value) => { if (active) { setAIPreferences(value); setAICount(AI_COUNT_CHOICES.includes(value.flashcardCount) ? value.flashcardCount : 10); } });
+    return () => { active = false; };
   }, []);
 
-  /* ----------------------------------------
-     LOAD FLASHCARDS
-  ---------------------------------------- */
+  function updateSettings(change: Partial<SessionSettings>) {
+    const next = { ...settings, ...change };
+    setSettings(next);
+    void AsyncStorage.setItem(SETTINGS_KEY, JSON.stringify(next)).catch(() => undefined);
+  }
 
-  const loadFlashcards = async () => {
+  /** Saves this topic's cards, leaving every other topic's cards untouched. */
+  async function saveTopicCards(updated: Flashcard[]) {
+    const others = (data?.cards ?? []).filter((card) => String(card.topicId) !== topicId);
+    await saveFlashcards([...others, ...updated]);
+  }
+
+  const routeParams = { id: topicId, name: topicName, subjectId };
+  const startDue = () => router.push({ pathname: '/subject/topic/study/review', params: routeParams });
+  const startPractice = () => router.push({
+    pathname: '/subject/topic/study/review',
+    params: { ...routeParams, mode: 'practice', count: settings.count, order: settings.order, answerFirst: settings.answerFirst ? '1' : '0' },
+  });
+
+  function openEditor(card: Flashcard | null) {
+    setEditing(card);
+    setFront(card?.front ?? '');
+    setBack(card?.back ?? '');
+    setEditorError('');
+    setEditorVisible(true);
+  }
+
+  async function saveCard() {
+    if (busy) return;
+    const question = front.trim();
+    const answer = back.trim();
+    if (!question || !answer) { setEditorError('Enter both a question and an answer.'); return; }
+    setBusy(true);
     try {
-      setLoading(true);
-
-      const cards =
-        await getFlashcardsForTopic(
-          topicId
-        );
-
-      setFlashcards(cards);
-      setCurrentIndex(0);
-      setShowAnswer(false);
-      setSessionFinished(false);
-      setActivitySaved(false);
+      const updated = editing
+        ? cards.map((card) => (card.id === editing.id ? { ...card, front: question, back: answer } : card))
+        : [...cards, { id: `${topicId}-${Date.now()}`, topicId, topicName, front: question, back: answer, createdAt: new Date().toISOString(), createdBy: 'manual' as const }];
+      await saveTopicCards(updated);
+      setEditorVisible(false);
     } catch (error) {
-      console.error(
-        'Failed to load flashcards:',
-        error
-      );
+      console.warn('Could not save the flashcard:', error);
+      setEditorError('The card could not be saved. Try again.');
     } finally {
-      setLoading(false);
+      setBusy(false);
     }
-  };
+  }
 
-  const refreshFlashcards = async () => {
-    try {
-      const currentCardId = flashcards[currentIndex]?.id;
-      const cards = await getFlashcardsForTopic(topicId);
-      setFlashcards(cards);
-      const currentCardIndex = cards.findIndex((card) => String(card.id) === String(currentCardId));
-      if (currentCardIndex >= 0) setCurrentIndex(currentCardIndex);
-      else if (currentIndex >= cards.length) {
-        setCurrentIndex(Math.max(0, cards.length - 1));
-        setShowAnswer(false);
-      }
-    } catch (error) {
-      console.warn('Could not refresh flashcards:', error);
+  function deleteCard(card: Flashcard) {
+    Alert.alert(L('Delete flashcard?', 'Slette flashcardet?'), card.front, [
+      { text: L('Cancel', 'Avbryt'), style: 'cancel' },
+      { text: L('Delete', 'Slett'), style: 'destructive', onPress: () => {
+        void saveTopicCards(cards.filter((item) => item.id !== card.id)).catch((error) => {
+          console.warn('Could not delete the flashcard:', error);
+          Alert.alert(L('Could not delete', 'Kunne ikke slette'), L('Please try again.', 'Prøv igjen.'));
+        });
+      } },
+    ]);
+  }
+
+  function openAI() {
+    if (aiPreferences && !aiPreferences.generateFlashcards) {
+      Alert.alert(L('AI flashcards are off', 'AI-flashcards er slått av'), L('Turn on flashcard generation in Settings, AI preferences.', 'Slå på generering av flashcards i Innstillinger, AI-innstillinger.'));
+      return;
     }
-  };
+    setDrafts(null);
+    setAIError('');
+    void topicNotes.load();
+    setAIVisible(true);
+  }
 
-  /*
-   * Helper used only when creating the
-   * initial starter cards.
-   */
-  const getAllFlashcards = async (): Promise<
-    Flashcard[]
-  > => {
-    return getFlashcards();
-  };
-
-  /* ----------------------------------------
-     SAVE FLASHCARDS
-  ---------------------------------------- */
-
-  const persistFlashcards = async (
-    updatedFlashcards: Flashcard[]
-  ): Promise<boolean> => {
+  async function generate() {
+    if (generating) return;
+    setGenerating(true);
+    setGenerated(0);
+    setAIError('');
     try {
-      const allFlashcards =
-        await getAllFlashcards();
-
-      const topicCardIds = new Set(
-        flashcards.map(
-          (card) => card.id
-        )
-      );
-
-      const otherCards =
-        allFlashcards.filter(
-          (card) =>
-            !topicCardIds.has(card.id)
-        );
-
-      await saveFlashcards([
-        ...otherCards,
-        ...updatedFlashcards,
-      ]);
-
-      setFlashcards(
-        updatedFlashcards
-      );
-      return true;
-    } catch (error) {
-      console.error(
-        'Failed to save flashcards:',
-        error
-      );
-
-      Alert.alert(
-        'Error',
-        'Could not save the flashcard.'
-      );
-      return false;
-    }
-  };
-
-  const generateCardsWithAI = async () => {
-    if (!aiEnabled) { Alert.alert('AI flashcards are off', 'Turn on flashcard generation in Settings → AI preferences to create cards.'); return; }
-    setGeneratingAI(true);
-    setAiProgress(0);
-    try {
-      const subjects = await getSubjects();
-      const subject = subjects.find((item) => String(item.id) === subjectKey);
-      const generated = await generateAIFlashcards({
-        subjectName: subject?.name ?? 'Medical studies',
+      const material = await topicNotes.save();
+      const result = await generateAIFlashcards({
+        subjectName: subjectName || 'Medical studies',
         topicName,
-        cardCount,
-        sourceMaterial: sourceMaterial.trim() || undefined,
-        difficulty: aiDifficulty,
-        explanationStyle: aiExplanationStyle,
-        onProgress: (completed) => setAiProgress(completed),
+        cardCount: aiCount,
+        sourceMaterial: material || undefined,
+        difficulty: aiPreferences?.difficulty ?? 'medium',
+        explanationStyle: aiPreferences?.explanationStyle ?? 'balanced',
+        onProgress: setGenerated,
       });
       const createdAt = new Date().toISOString();
-      const cards: Flashcard[] = generated.map((card, index) => ({
-        id: `ai-${topicId}-${Date.now()}-${index}`,
-        topicId,
-        topicName,
-        front: card.front,
-        back: card.back,
-        createdAt,
-      }));
-      setAiPromptVisible(false);
-      setAIDrafts(cards);
-      setAIPreviewVisible(true);
+      setDrafts(result.map((card, index) => ({ id: `ai-${topicId}-${Date.now()}-${index}`, topicId, topicName, front: card.front, back: card.back, createdAt, createdBy: 'ai' as const })));
     } catch (error) {
-      Alert.alert('Could not generate flashcards', error instanceof Error ? error.message : 'Please try again.');
+      console.warn('AI flashcard generation failed:', error);
+      setAIError(error instanceof Error ? error.message : 'Could not generate flashcards. Please try again.');
     } finally {
-      setGeneratingAI(false);
+      setGenerating(false);
     }
-  };
+  }
 
-  const saveAIDrafts = async () => {
-    const reviewedDrafts = aiDrafts.filter((card) => card.front.trim() && card.back.trim());
-    if (!reviewedDrafts.length) {
-      Alert.alert('No complete cards', 'Keep at least one card with both a question and an answer.');
+  async function saveDrafts() {
+    const complete = (drafts ?? []).filter((card) => card.front.trim() && card.back.trim());
+    if (!complete.length) { setAIError('Keep at least one card with both a question and an answer.'); return; }
+    setBusy(true);
+    try {
+      await saveTopicCards([...cards, ...complete.map((card) => ({ ...card, front: card.front.trim(), back: card.back.trim() }))]);
+      setAIVisible(false);
+      setDrafts(null);
+    } catch (error) {
+      console.warn('Could not save the AI flashcards:', error);
+      setAIError('The cards could not be saved. Try again.');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  function closeAI() {
+    if (generating || busy) return;
+    if (drafts?.length) {
+      Alert.alert(L('Discard these cards?', 'Forkaste disse kortene?'), L('The generated cards have not been saved.', 'De genererte kortene er ikke lagret.'), [
+        { text: L('Keep editing', 'Fortsett å redigere'), style: 'cancel' },
+        { text: L('Discard', 'Forkast'), style: 'destructive', onPress: () => { setAIVisible(false); setDrafts(null); } },
+      ]);
       return;
     }
-    if (!await persistFlashcards([...flashcards, ...reviewedDrafts])) return;
-    setAIPreviewVisible(false);
-    setAIDrafts([]);
-    setSourceMaterial('');
-    Alert.alert('Flashcards saved', `${reviewedDrafts.length} edited cards were added to ${topicName}.`);
-  };
+    setAIVisible(false);
+  }
 
-  const aiMaterialModal = (
-    <Modal visible={aiPromptVisible} transparent animationType="slide" onRequestClose={() => !generatingAI && setAiPromptVisible(false)}>
-      <KeyboardAvoidingView style={styles.keyboardContainer} behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
-        <View style={styles.modalOverlay}>
-          <ScrollView
-            style={styles.modalScroll}
-            contentContainerStyle={styles.modalScrollContent}
-            keyboardShouldPersistTaps="handled"
-            keyboardDismissMode={Platform.OS === 'ios' ? 'interactive' : 'on-drag'}
-            automaticallyAdjustKeyboardInsets={Platform.OS === 'ios'}
-          >
-          <View style={styles.aiModalCard}>
-            <Text style={styles.modalTitle}>Create flashcards with AI</Text>
-            <Text style={styles.aiModalCopy}>Add lecture notes or learning objectives for more course-focused cards. Leave blank for general study cards.</Text>
-            <Text style={styles.aiCountLabel}>How many cards?</Text>
-            <View style={styles.aiCountChoices}>{[10, 20, 30, 50].map((count) => <Pressable key={count} accessibilityRole="button" accessibilityState={{ selected: cardCount === count }} onPress={() => setCardCount(count)} style={[styles.aiCountChoice, cardCount === count && styles.aiCountChoiceSelected]}><Text style={[styles.aiCountChoiceText, cardCount === count && styles.aiCountChoiceTextSelected]}>{count}</Text></Pressable>)}</View>
-            <TextInput
-              value={sourceMaterial}
-              onChangeText={setSourceMaterial}
-              placeholder="Paste course notes (optional)"
-              placeholderTextColor={appColor('#9AAAB4', 'text')}
-              multiline
-              maxLength={20000}
-              textAlignVertical="top"
-              style={styles.aiNotes}
-              accessibilityLabel="Optional course notes for AI flashcards"
-            />
-            <Text style={styles.aiCaution}>AI can make mistakes. Check generated cards against the course material.</Text>
-            {generatingAI ? <View style={styles.aiBusy}><ActivityIndicator color={appColor('#327E9D', 'text')} /><Text style={styles.aiModalCopy}>Creating {aiProgress} of {cardCount} cards…</Text></View> : <View style={styles.modalActions}>
-              <Pressable style={styles.cancelButton} onPress={() => setAiPromptVisible(false)}><Text style={styles.cancelButtonText}>Cancel</Text></Pressable>
-              <Pressable style={styles.saveButton} onPress={() => { void generateCardsWithAI(); }}><Text style={styles.saveButtonText}>Create cards</Text></Pressable>
-            </View>}
-          </View>
-          </ScrollView>
-        </View>
-      </KeyboardAvoidingView>
-    </Modal>
-  );
+  const due = cards.filter((card) => isCardDue(card)).length;
+  const reviews = (data?.reviews ?? []).filter((review) => String(review.topicId) === topicId);
+  const remembered = reviews.filter((review) => review.rating === 'good' || review.rating === 'easy').length;
+  const forgotten = reviews.filter((review) => review.rating === 'again').length;
+  const cardProgress = topic ? calculateTopicMastery({ ...topic, daysSinceLastStudy: topic.daysSinceStudy }).parts.cards : 0;
+  const shownCards = showAll ? cards : cards.slice(0, PREVIEW_CARDS);
 
-  const aiPreviewModal = (
-    <Modal visible={aiPreviewVisible} transparent animationType="slide" onRequestClose={() => setAIPreviewVisible(false)}>
-      <KeyboardAvoidingView style={styles.keyboardContainer} behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
-        <View style={styles.modalOverlay}>
-          <ScrollView style={styles.modalScroll} contentContainerStyle={styles.modalScrollContent} keyboardShouldPersistTaps="handled" keyboardDismissMode={Platform.OS === 'ios' ? 'interactive' : 'on-drag'} automaticallyAdjustKeyboardInsets={Platform.OS === 'ios'}>
-            <View style={styles.aiModalCard}>
-              <Text style={styles.modalTitle}>Review AI flashcards</Text>
-              <Text style={styles.aiModalCopy}>Edit or remove anything you don’t want. Cards are only saved when you tap Save cards.</Text>
-              {aiDrafts.map((card, index) => <View key={card.id} style={styles.aiDraftCard}>
-                <View style={styles.aiDraftHeader}><Text style={styles.aiCountLabel}>CARD {index + 1}</Text><Pressable accessibilityRole="button" accessibilityLabel="Remove flashcard" onPress={() => setAIDrafts((items) => items.filter((item) => item.id !== card.id))}><Text style={styles.aiDraftRemove}>Remove</Text></Pressable></View>
-                <Text style={styles.modalLabel}>Question</Text>
-                <TextInput value={card.front} onChangeText={(front) => setAIDrafts((items) => items.map((item) => item.id === card.id ? { ...item, front } : item))} style={styles.aiDraftInput} multiline />
-                <Text style={styles.modalLabel}>Answer</Text>
-                <TextInput value={card.back} onChangeText={(back) => setAIDrafts((items) => items.map((item) => item.id === card.id ? { ...item, back } : item))} style={[styles.aiDraftInput, styles.aiDraftAnswer]} multiline />
-              </View>)}
-              <View style={styles.modalActions}>
-                <Pressable style={styles.cancelButton} onPress={() => { setAIPreviewVisible(false); setAIDrafts([]); }}><Text style={styles.cancelButtonText}>Discard</Text></Pressable>
-                <Pressable disabled={aiDrafts.length === 0} style={styles.saveButton} onPress={() => { void saveAIDrafts(); }}><Text style={styles.saveButtonText}>Save {aiDrafts.length} cards</Text></Pressable>
+  const editor = (
+    <Modal visible={editorVisible} transparent animationType="slide" onRequestClose={() => !busy && setEditorVisible(false)}>
+      <KeyboardAvoidingView style={styles.modalKeyboard} behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
+        <View style={ui.modalBackdrop}>
+          <ScrollView contentContainerStyle={styles.modalScroll} keyboardShouldPersistTaps="handled">
+            <View style={ui.modalCard}>
+              <Text style={ui.modalTitle}>{editing ? L('Edit flashcard', 'Rediger flashcard') : L('New flashcard', 'Nytt flashcard')}</Text>
+              <Text style={ui.fieldLabel}>{L('QUESTION', 'SPØRSMÅL')}</Text>
+              <TextInput value={front} onChangeText={(value) => { setFront(value); setEditorError(''); }} style={[ui.textInput, styles.multiline]} placeholder={L('What do you want to remember?', 'Hva vil du huske?')} placeholderTextColor={appColor('#91A2AE', 'text')} multiline maxLength={500} autoFocus accessibilityLabel={L('Question', 'Spørsmål')} />
+              <Text style={ui.fieldLabel}>{L('ANSWER', 'SVAR')}</Text>
+              <TextInput value={back} onChangeText={(value) => { setBack(value); setEditorError(''); }} style={[ui.textInput, styles.multiline]} placeholder={L('The answer', 'Svaret')} placeholderTextColor={appColor('#91A2AE', 'text')} multiline maxLength={2000} accessibilityLabel={L('Answer', 'Svar')} />
+              {editorError ? <Text style={ui.formError}>{L(editorError, editorError === 'Enter both a question and an answer.' ? 'Skriv inn både spørsmål og svar.' : 'Kortet kunne ikke lagres. Prøv igjen.')}</Text> : null}
+              <View style={ui.modalActions}>
+                <Pressable accessibilityRole="button" style={ui.secondaryButton} onPress={() => setEditorVisible(false)} disabled={busy}><Text style={ui.secondaryButtonText}>{L('Cancel', 'Avbryt')}</Text></Pressable>
+                <Pressable accessibilityRole="button" style={[ui.primaryButton, busy && ui.disabled]} onPress={() => { void saveCard(); }} disabled={busy}>
+                  {busy ? <ActivityIndicator color="#FFFFFF" /> : <Text style={ui.primaryButtonText}>{L('Save card', 'Lagre kort')}</Text>}
+                </Pressable>
               </View>
             </View>
           </ScrollView>
@@ -315,1765 +242,197 @@ export default function FlashcardsScreen() {
     </Modal>
   );
 
-  /* ----------------------------------------
-     ADD / EDIT MODAL
-  ---------------------------------------- */
+  const aiModal = (
+    <Modal visible={aiVisible} transparent animationType="slide" onRequestClose={closeAI}>
+      <KeyboardAvoidingView style={styles.modalKeyboard} behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
+        <View style={ui.modalBackdrop}>
+          <ScrollView style={styles.aiScroll} contentContainerStyle={styles.modalScroll} keyboardShouldPersistTaps="handled" keyboardDismissMode={Platform.OS === 'ios' ? 'interactive' : 'on-drag'} automaticallyAdjustKeyboardInsets={Platform.OS === 'ios'}>
+            <View style={ui.modalCard}>
+              <View style={ui.modalHeader}>
+                <View style={ui.modalIcon}><StudyIcon name="sparkles" size={18} color={palette.accent} /></View>
+                <View style={ui.grow}>
+                  <Text style={ui.modalTitle}>{drafts ? L('Check the cards', 'Se over kortene') : L('Create flashcards with AI', 'Lag flashcards med AI')}</Text>
+                  <Text style={ui.cardDescription}>{drafts ? L('Edit or remove anything before saving. Nothing is saved yet.', 'Rediger eller fjern før du lagrer. Ingenting er lagret ennå.') : topicName}</Text>
+                </View>
+              </View>
 
-  const openAddModal = () => {
-    setEditingCard(null);
-    setFrontText('');
-    setBackText('');
-    setModalVisible(true);
-  };
-
-  const openEditModal = (
-    card: Flashcard
-  ) => {
-    setEditingCard(card);
-    setFrontText(card.front);
-    setBackText(card.back);
-    setModalVisible(true);
-  };
-
-  const closeModal = () => {
-    setModalVisible(false);
-    setEditingCard(null);
-    setFrontText('');
-    setBackText('');
-  };
-
-  /* ----------------------------------------
-     SAVE CARD
-  ---------------------------------------- */
-
-  const handleSaveCard = async () => {
-    const front =
-      frontText.trim();
-
-    const back =
-      backText.trim();
-
-    if (!front || !back) {
-      Alert.alert(
-        'Missing information',
-        'Please enter both a question and an answer.'
-      );
-
-      return;
-    }
-
-    if (editingCard) {
-      const updatedFlashcards =
-        flashcards.map(
-          (card) =>
-            card.id ===
-            editingCard.id
-              ? {
-                  ...card,
-                  front,
-                  back,
-                }
-              : card
-        );
-
-      if (!await persistFlashcards(updatedFlashcards)) return;
-    } else {
-      const newCard: Flashcard = {
-        id: `${topicId}-${Date.now()}`,
-        topicId,
-        topicName,
-        front,
-        back,
-        createdAt:
-          new Date().toISOString(),
-      };
-
-      if (!await persistFlashcards([...flashcards, newCard])) return;
-    }
-
-    closeModal();
-  };
-
-  /* ----------------------------------------
-     DELETE CARD
-  ---------------------------------------- */
-
-  const handleDeleteCard = (
-    card: Flashcard
-  ) => {
-    Alert.alert(
-      'Delete flashcard',
-      'Are you sure you want to delete this flashcard?',
-      [
-        {
-          text: 'Cancel',
-          style: 'cancel',
-        },
-        {
-          text: 'Delete',
-          style: 'destructive',
-          onPress: async () => {
-            const updatedFlashcards =
-              flashcards.filter(
-                (item) =>
-                  item.id !==
-                  card.id
-              );
-
-            await persistFlashcards(
-              updatedFlashcards
-            );
-
-            if (
-              currentIndex >=
-                updatedFlashcards.length &&
-              updatedFlashcards.length > 0
-            ) {
-              setCurrentIndex(
-                updatedFlashcards.length -
-                  1
-              );
-            }
-
-            if (
-              updatedFlashcards.length ===
-              0
-            ) {
-              setCurrentIndex(0);
-            }
-
-            setShowAnswer(false);
-          },
-        },
-      ]
-    );
-  };
-
-  /* ----------------------------------------
-     STUDY ACTIVITY
-  ---------------------------------------- */
-
-  const saveStudyActivity =
-    async () => {
-      try {
-        const durationSeconds =
-          Math.max(
-            1,
-            Math.round(
-              (Date.now() -
-                sessionStartedAt) /
-                1000
-            )
-          );
-
-        const activity: StudyActivity = {
-          id: Date.now(),
-          topicId,
-          topicName,
-          activity: 'flashcards',
-          completedAt:
-            new Date().toISOString(),
-          durationSeconds,
-          questionCount:
-            flashcards.length,
-        };
-
-        await addStudyActivity(
-          activity
-        );
-
-        setActivitySaved(true);
-      } catch (error) {
-        console.error(
-          'Failed to save flashcard activity:',
-          error
-        );
-      }
-    };
-
-  /* ----------------------------------------
-     NAVIGATION
-  ---------------------------------------- */
-
-  const handleNext = async () => {
-    const isLastCard =
-      currentIndex ===
-      flashcards.length - 1;
-
-    if (isLastCard) {
-      await saveStudyActivity();
-      setSessionFinished(true);
-      return;
-    }
-
-    setCurrentIndex(
-      (previous) =>
-        previous + 1
-    );
-
-    setShowAnswer(false);
-  };
-
-  const handleStartAgain = async () => {
-    await loadFlashcards();
-
-    setCurrentIndex(0);
-    setShowAnswer(false);
-    setSessionFinished(false);
-    setActivitySaved(false);
-    setManageMode(false);
-  };
-
-  /* ----------------------------------------
-     LOADING
-  ---------------------------------------- */
-
-  if (loading) {
-    return (
-      <SafeAreaView
-        style={styles.container}
-      >
-        <Stack.Screen
-          options={{
-            headerShown: false,
-          }}
-        />
-
-        <View
-          style={
-            styles.loadingContainer
-          }
-        >
-          <ActivityIndicator
-            size="large"
-          />
-
-          <Text
-            style={
-              styles.loadingText
-            }
-          >
-            Loading flashcards...
-          </Text>
-        </View>
-      </SafeAreaView>
-    );
-  }
-
-  /* ----------------------------------------
-     MANAGE FLASHCARDS
-  ---------------------------------------- */
-
-  if (manageMode) {
-    return (
-      <SafeAreaView
-        style={styles.container}
-      >
-        <Stack.Screen
-          options={{
-            headerShown: false,
-          }}
-        />
-
-        <PullToRefreshScrollView
-          onRefresh={refreshFlashcards}
-          showsVerticalScrollIndicator={
-            false
-          }
-          contentContainerStyle={
-            styles.manageScrollContent
-          }
-        >
-          <Pressable
-            style={styles.backButton}
-            onPress={() =>
-              setManageMode(false)
-            }
-          >
-            <Text
-              style={styles.backText}
-            >
-              ← Back to flashcards
-            </Text>
-          </Pressable>
-
-          <Text style={styles.title}>
-            My flashcards
-          </Text>
-
-          <Text
-            style={styles.topicName}
-          >
-            {topicName}
-          </Text>
-
-          <Text
-            style={styles.subtitle}
-          >
-            Create and manage flashcards
-            for this topic.
-          </Text>
-
-          <Pressable
-            style={styles.addButton}
-            onPress={openAddModal}
-          >
-            <Text
-              style={
-                styles.addButtonText
-              }
-            >
-              + Add flashcard
-            </Text>
-          </Pressable>
-
-          <Pressable
-            style={[styles.aiButton, generatingAI && styles.aiButtonDisabled]}
-            disabled={generatingAI}
-            onPress={() => setAiPromptVisible(true)}
-          >
-            {generatingAI ? <ActivityIndicator color={appColor('#327E9D', 'text')} /> : <View style={styles.aiActionContent}><StudyIcon name="sparkles" size={17} /><Text style={styles.aiButtonText}>Generate with AI</Text></View>}
-          </Pressable>
-          {aiMaterialModal}
-          {aiPreviewModal}
-
-          {flashcards.length === 0 ? (
-            <View
-              style={
-                styles.emptyManageCard
-              }
-            >
-              <Text
-                style={
-                  styles.emptyManageTitle
-                }
-              >
-                No flashcards yet
-              </Text>
-
-              <Text
-                style={
-                  styles.emptyManageText
-                }
-              >
-                Add your first flashcard
-                to start studying this
-                topic.
-              </Text>
-            </View>
-          ) : (
-            flashcards.map(
-              (card, index) => (
-                <View
-                  key={card.id}
-                  style={
-                    styles.manageCard
-                  }
-                >
-                  <View
-                    style={
-                      styles.manageCardHeader
-                    }
-                  >
-                    <Text
-                      style={
-                        styles.manageCardNumber
-                      }
-                    >
-                      Card {index + 1}
-                    </Text>
-
-                    <View
-                      style={
-                        styles.manageActions
-                      }
-                    >
-                      <Pressable
-                        style={
-                          styles.editButton
-                        }
-                        onPress={() =>
-                          openEditModal(
-                            card
-                          )
-                        }
-                      >
-                        <Text
-                          style={
-                            styles.editButtonText
-                          }
-                        >
-                          Edit
-                        </Text>
-                      </Pressable>
-
-                      <Pressable
-                        style={
-                          styles.deleteButton
-                        }
-                        onPress={() =>
-                          handleDeleteCard(
-                            card
-                          )
-                        }
-                      >
-                        <Text
-                          style={
-                            styles.deleteButtonText
-                          }
-                        >
-                          Delete
-                        </Text>
-                      </Pressable>
-                    </View>
+              {!drafts ? (
+                <>
+                  <Text style={ui.fieldLabel}>{L('HOW MANY CARDS', 'ANTALL KORT')}</Text>
+                  <Chips value={String(aiCount)} onChange={(value) => setAICount(Number(value))} items={AI_COUNT_CHOICES.map((value) => ({ key: String(value), label: String(value) }))} />
+                  <TopicNotesField state={topicNotes} disabled={generating} />
+                  <Text style={p.small}>{L('Always check the cards against your course material.', 'Sjekk alltid kortene mot pensum.')}</Text>
+                  {generating ? <View style={styles.generating}><ActivityIndicator color={palette.accent} /><Text style={p.body}>{L(`Creating ${generated} of ${aiCount} cards`, `Lager ${generated} av ${aiCount} kort`)}</Text></View> : null}
+                </>
+              ) : drafts.map((card, index) => (
+                <View key={card.id} style={styles.draft}>
+                  <View style={styles.draftTop}>
+                    <Text style={ui.fieldLabel}>{L('CARD', 'KORT')} {index + 1}</Text>
+                    <Pressable accessibilityRole="button" accessibilityLabel={L('Remove card', 'Fjern kort')} onPress={() => setDrafts((items) => (items ?? []).filter((item) => item.id !== card.id))} hitSlop={10}>
+                      <StudyIcon name="x" size={15} color={ink.muted} />
+                    </Pressable>
                   </View>
-
-                  <Text
-                    style={
-                      styles.manageQuestion
-                    }
-                  >
-                    {card.front}
-                  </Text>
-
-                  <View
-                    style={
-                      styles.manageDivider
-                    }
-                  />
-
-                  <Text
-                    style={
-                      styles.manageAnswerLabel
-                    }
-                  >
-                    Answer
-                  </Text>
-
-                  <Text
-                    style={
-                      styles.manageAnswer
-                    }
-                  >
-                    {card.back}
-                  </Text>
+                  <TextInput value={card.front} onChangeText={(value) => setDrafts((items) => (items ?? []).map((item) => (item.id === card.id ? { ...item, front: value } : item)))} style={[ui.textInput, styles.draftInput]} multiline accessibilityLabel={L('Question', 'Spørsmål')} />
+                  <TextInput value={card.back} onChangeText={(value) => setDrafts((items) => (items ?? []).map((item) => (item.id === card.id ? { ...item, back: value } : item)))} style={[ui.textInput, styles.draftInput]} multiline accessibilityLabel={L('Answer', 'Svar')} />
                 </View>
-              )
-            )
-          )}
-        </PullToRefreshScrollView>
+              ))}
 
-        <Modal
-          visible={modalVisible}
-          transparent
-          animationType="slide"
-          onRequestClose={
-            closeModal
-          }
-        >
-          <KeyboardAvoidingView
-            style={
-              styles.keyboardContainer
-            }
-            behavior={
-              Platform.OS === 'ios'
-                ? 'padding'
-                : 'height'
-            }
-          >
-            <View
-              style={
-                styles.modalOverlay
-              }
-            >
-              <ScrollView
-                style={styles.modalScroll}
-                contentContainerStyle={styles.modalScrollContent}
-                keyboardShouldPersistTaps="handled"
-                keyboardDismissMode={Platform.OS === 'ios' ? 'interactive' : 'on-drag'}
-                automaticallyAdjustKeyboardInsets={Platform.OS === 'ios'}
-              >
-              <View style={styles.modalCard}>
-                <Text
-                  style={
-                    styles.modalTitle
-                  }
-                >
-                  {editingCard
-                    ? 'Edit flashcard'
-                    : 'Add flashcard'}
-                </Text>
-
-                <Text
-                  style={
-                    styles.modalLabel
-                  }
-                >
-                  Question
-                </Text>
-
-                <TextInput
-                  value={frontText}
-                  onChangeText={
-                    setFrontText
-                  }
-                  placeholder="Enter your question..."
-                  placeholderTextColor={appColor('#9AAAB4', 'text')}
-                  multiline
-                  style={styles.input}
-                />
-
-                <Text
-                  style={
-                    styles.modalLabel
-                  }
-                >
-                  Answer
-                </Text>
-
-                <TextInput
-                  value={backText}
-                  onChangeText={
-                    setBackText
-                  }
-                  placeholder="Enter the answer..."
-                  placeholderTextColor={appColor('#9AAAB4', 'text')}
-                  multiline
-                  style={[
-                    styles.input,
-                    styles.answerInput,
-                  ]}
-                />
-
-                <View
-                  style={
-                    styles.modalActions
-                  }
-                >
-                  <Pressable
-                    style={
-                      styles.cancelButton
-                    }
-                    onPress={
-                      closeModal
-                    }
-                  >
-                    <Text
-                      style={
-                        styles.cancelButtonText
-                      }
-                    >
-                      Cancel
-                    </Text>
+              {aiError ? <Text style={ui.formError}>{aiError}</Text> : null}
+              <View style={ui.modalActions}>
+                <Pressable accessibilityRole="button" style={ui.secondaryButton} onPress={closeAI} disabled={generating || busy}><Text style={ui.secondaryButtonText}>{drafts ? L('Discard', 'Forkast') : L('Cancel', 'Avbryt')}</Text></Pressable>
+                {drafts ? (
+                  <Pressable accessibilityRole="button" style={[ui.primaryButton, (busy || drafts.length === 0) && ui.disabled]} onPress={() => { void saveDrafts(); }} disabled={busy || drafts.length === 0}>
+                    {busy ? <ActivityIndicator color="#FFFFFF" /> : <Text style={ui.primaryButtonText}>{L(`Save ${drafts.length} cards`, `Lagre ${drafts.length} kort`)}</Text>}
                   </Pressable>
-
-                  <Pressable
-                    style={
-                      styles.saveButton
-                    }
-                    onPress={
-                      handleSaveCard
-                    }
-                  >
-                    <Text
-                      style={
-                        styles.saveButtonText
-                      }
-                    >
-                      {editingCard
-                        ? 'Save changes'
-                        : 'Add flashcard'}
-                    </Text>
+                ) : (
+                  <Pressable accessibilityRole="button" style={[ui.primaryButton, generating && ui.disabled]} onPress={() => { void generate(); }} disabled={generating}>
+                    <Text style={ui.primaryButtonText}>{L('Create cards', 'Lag kort')}</Text>
                   </Pressable>
-                </View>
+                )}
               </View>
-              </ScrollView>
             </View>
-          </KeyboardAvoidingView>
-        </Modal>
-      </SafeAreaView>
+          </ScrollView>
+        </View>
+      </KeyboardAvoidingView>
+    </Modal>
+  );
+
+  let body;
+  if (!data) {
+    body = <View style={styles.state}>{loading ? <ActivityIndicator color={palette.accent} /> : <Text style={p.body}>{L('The flashcards could not be loaded. Pull down to try again.', 'Kortene kunne ikke lastes inn. Dra ned for å prøve igjen.')}</Text>}</View>;
+  } else if (cards.length === 0) {
+    body = (
+      <View style={[p.card, p.empty]}>
+        <IconChip name="cards" />
+        <Text style={p.emptyTitle}>{L('No flashcards yet', 'Ingen flashcards ennå')}</Text>
+        <Text style={[p.body, studyStyles.centered]}>{L('Let AI make cards from your lecture notes, or write your own.', 'La AI lage kort fra forelesningsnotatene dine, eller skriv dine egne.')}</Text>
+        <Pressable accessibilityRole="button" onPress={openAI} style={({ pressed }) => [p.button, styles.wide, styles.buttonRow, { backgroundColor: palette.accent }, pressed && p.pressed]}>
+          <StudyIcon name="sparkles" size={16} color="#FFFFFF" /><Text style={p.buttonText}>{L('Generate with AI', 'Lag med AI')}</Text>
+        </Pressable>
+        <Pressable accessibilityRole="button" onPress={() => openEditor(null)} style={({ pressed }) => [p.outlineButton, styles.wide, pressed && p.pressed]}>
+          <Text style={p.outlineButtonText}>{L('Write a card', 'Skriv et kort')}</Text>
+        </Pressable>
+      </View>
     );
-  }
+  } else {
+    body = (
+      <>
+        <View style={[p.card, p.row]}>
+          <IconChip name={due ? 'cards' : 'check'} />
+          <View style={p.grow}>
+            <Text style={styles.rowTitle}>{due ? L(`${due} ${due === 1 ? 'card' : 'cards'} due now`, `${due} kort har forfalt`) : L('Nothing due right now', 'Ingenting har forfalt nå')}</Text>
+            <Text style={p.small}>{due ? L('Review them to keep them in memory.', 'Repeter dem for å holde dem i minnet.') : L('You can still practise below.', 'Du kan fortsatt øve nedenfor.')}</Text>
+          </View>
+          {due ? <PillButton label={L('Start', 'Start')} onPress={startDue} /> : null}
+        </View>
 
-  /* ----------------------------------------
-     EMPTY STATE
-  ---------------------------------------- */
+        <View style={p.card}>
+          <View style={p.cardHeader}>
+            <Text style={p.cardTitle}>{L('Flashcard progress', 'Fremgang med flashcards')}</Text>
+            <Text style={styles.percent}>{cardProgress}%</Text>
+          </View>
+          <ProgressBar value={cardProgress} color={palette.accent} trackColor={palette.track} height={8} />
+          <View style={styles.stats}>
+            <View style={styles.stat}><Text style={styles.statValue}>{reviews.length}</Text><Text style={styles.statLabel}>{L('Reviews', 'Repetisjoner')}</Text></View>
+            <View style={styles.statDivider} />
+            <View style={styles.stat}><Text style={styles.statValue}>{remembered}</Text><Text style={styles.statLabel}>{L('Remembered', 'Husket')}</Text></View>
+            <View style={styles.statDivider} />
+            <View style={styles.stat}><Text style={styles.statValue}>{forgotten}</Text><Text style={styles.statLabel}>{L('Forgotten', 'Glemt')}</Text></View>
+          </View>
+        </View>
 
-  if (flashcards.length === 0) {
-    return (
-      <SafeAreaView
-        style={styles.container}
-      >
-        <Stack.Screen
-          options={{
-            headerShown: false,
-          }}
-        />
-
-        <Pressable
-          style={styles.backButton}
-          onPress={() =>
-            router.back()
-          }
-        >
-          <Text
-            style={styles.backText}
-          >
-            ← Back
-          </Text>
+        <SectionHeader title={L('Practice settings', 'Innstillinger for øving')} />
+        <View style={p.card}>
+          <Text style={styles.settingLabel}>{L('Number of cards', 'Antall kort')}</Text>
+          <Chips value={settings.count} onChange={(value) => updateSettings({ count: value })} items={COUNT_CHOICES.map((value) => ({ key: value, label: value === '0' ? L('All', 'Alle') : value }))} />
+          <Text style={styles.settingLabel}>{L('Card order', 'Rekkefølge')}</Text>
+          <Chips<CardOrder>
+            value={settings.order}
+            onChange={(value) => updateSettings({ order: value })}
+            items={[{ key: 'smart', label: L('Due first', 'Forfalte først') }, { key: 'ordered', label: L('In order', 'I rekkefølge') }, { key: 'shuffled', label: L('Shuffled', 'Stokket') }]}
+          />
+          <View style={styles.toggle}>
+            <Text style={[styles.settingLabel, p.grow]}>{L('Show answer first', 'Vis svaret først')}</Text>
+            <Switch accessibilityLabel={L('Show answer first', 'Vis svaret først')} value={settings.answerFirst} onValueChange={(value) => updateSettings({ answerFirst: value })} trackColor={{ false: '#C9D6DC', true: palette.accent }} ios_backgroundColor="#C9D6DC" />
+          </View>
+        </View>
+        <Pressable accessibilityRole="button" onPress={startPractice} style={({ pressed }) => [p.button, styles.start, styles.buttonRow, { backgroundColor: palette.accent }, pressed && p.pressed]}>
+          <StudyIcon name="play" size={15} color="#FFFFFF" /><Text style={styles.startText}>{L('Start flashcards', 'Start flashcards')}</Text>
         </Pressable>
 
-        <View
-          style={
-            styles.emptyContainer
-          }
-        >
-          <Text
-            style={styles.emptyTitle}
-          >
-            No flashcards yet
-          </Text>
-
-          <Text
-            style={styles.emptyText}
-          >
-            Create your first flashcard
-            to start studying this topic.
-          </Text>
-
-          <Pressable
-            style={styles.addButton}
-            onPress={() =>
-              setManageMode(true)
-            }
-          >
-            <Text
-              style={
-                styles.addButtonText
-              }
-            >
-              + Add flashcard
-            </Text>
+        <SectionHeader title={`${L('Your cards', 'Kortene dine')} (${cards.length})`} action={cards.length > PREVIEW_CARDS ? (showAll ? L('Show fewer', 'Vis færre') : L('See all', 'Se alle')) : undefined} onAction={() => setShowAll((value) => !value)} />
+        <View style={styles.buttonRow}>
+          <Pressable accessibilityRole="button" onPress={openAI} style={({ pressed }) => [p.outlineButton, p.grow, styles.buttonRow, pressed && p.pressed]}>
+            <StudyIcon name="sparkles" size={15} color={palette.accent} /><Text style={p.outlineButtonText}>{L('Generate with AI', 'Lag med AI')}</Text>
           </Pressable>
-
-          <Pressable
-            style={[styles.aiButton, generatingAI && styles.aiButtonDisabled]}
-            disabled={generatingAI}
-            onPress={() => setAiPromptVisible(true)}
-          >
-            {generatingAI ? <ActivityIndicator color={appColor('#327E9D', 'text')} /> : <View style={styles.aiActionContent}><StudyIcon name="sparkles" size={17} /><Text style={styles.aiButtonText}>Generate with AI</Text></View>}
+          <Pressable accessibilityRole="button" onPress={() => openEditor(null)} style={({ pressed }) => [p.outlineButton, p.grow, styles.buttonRow, pressed && p.pressed]}>
+            <StudyIcon name="plus" size={15} color={palette.accent} /><Text style={p.outlineButtonText}>{L('Add card', 'Legg til kort')}</Text>
           </Pressable>
-          {aiMaterialModal}
-          {aiPreviewModal}
         </View>
-      </SafeAreaView>
-    );
-  }
-
-  /* ----------------------------------------
-     FINISHED
-  ---------------------------------------- */
-
-  if (sessionFinished) {
-    return (
-      <SafeAreaView
-        style={styles.container}
-      >
-        <Stack.Screen
-          options={{
-            headerShown: false,
-          }}
-        />
-
-        <PullToRefreshScrollView
-          onRefresh={refreshFlashcards}
-          showsVerticalScrollIndicator={
-            false
-          }
-          contentContainerStyle={
-            styles.finishedScrollContent
-          }
-        >
-          <Pressable
-            style={styles.backButton}
-            onPress={() =>
-              router.back()
-            }
-          >
-            <Text
-              style={styles.backText}
-            >
-              ← Back
-            </Text>
-          </Pressable>
-
-          <Text
-            style={
-              styles.finishedTitle
-            }
-          >
-            Flashcards complete
-          </Text>
-
-          <Text
-            style={styles.topicName}
-          >
-            {topicName}
-          </Text>
-
-          <Text
-            style={styles.subtitle}
-          >
-            You completed this flashcard
-            session.
-          </Text>
-
-          <View
-            style={styles.summaryCard}
-          >
-            <Text
-              style={styles.summaryLabel}
-            >
-              Cards reviewed
-            </Text>
-
-            <Text
-              style={styles.summaryNumber}
-            >
-              {flashcards.length}
-            </Text>
-
-            <Text
-              style={styles.summaryText}
-            >
-              Keep reviewing your
-              flashcards regularly to
-              strengthen your memory.
-            </Text>
+        {shownCards.map((card) => (
+          <View key={card.id} style={styles.cardRow}>
+            <Pressable accessibilityRole="button" accessibilityLabel={L('Edit card', 'Rediger kort')} onPress={() => openEditor(card)} style={({ pressed }) => [p.grow, pressed && p.pressed]}>
+              <Text style={styles.cardFront} numberOfLines={2}>{card.front}</Text>
+              <Text style={p.small} numberOfLines={2}>{card.back}</Text>
+              <Text style={styles.cardMeta}>
+                {isCardDue(card) ? L('Due now', 'Forfalt nå') : `${L('Next review', 'Neste repetisjon')} ${new Date(card.nextReviewAt ?? '').toLocaleDateString(language === 'no' ? 'nb-NO' : 'en-GB', { day: 'numeric', month: 'short' })}`}
+                {card.createdBy === 'ai' ? ` · ${L('Made with AI', 'Laget med AI')}` : ''}
+              </Text>
+            </Pressable>
+            <Pressable accessibilityRole="button" accessibilityLabel={L('Delete card', 'Slett kort')} onPress={() => deleteCard(card)} style={({ pressed }) => [styles.delete, pressed && p.pressed]} hitSlop={8}>
+              <StudyIcon name="trash" size={17} color={ink.muted} />
+            </Pressable>
           </View>
-
-          {activitySaved && (
-            <View
-              style={styles.savedCard}
-            >
-              <Text
-                style={styles.savedTitle}
-              >
-                ✓ Saved to your progress
-              </Text>
-
-              <Text
-                style={styles.savedText}
-              >
-                This flashcard session has
-                been added to your study
-                activity.
-              </Text>
-            </View>
-          )}
-
-          <Pressable
-            style={styles.nextButton}
-            onPress={
-              handleStartAgain
-            }
-          >
-            <Text
-              style={
-                styles.nextButtonText
-              }
-            >
-              Start again
-            </Text>
-          </Pressable>
-
-          <Pressable
-            style={
-              styles.manageSecondaryButton
-            }
-            onPress={() =>
-              setManageMode(true)
-            }
-          >
-            <Text
-              style={
-                styles.manageSecondaryButtonText
-              }
-            >
-              Manage flashcards
-            </Text>
-          </Pressable>
-        </PullToRefreshScrollView>
-      </SafeAreaView>
+        ))}
+      </>
     );
   }
-
-  /* ----------------------------------------
-     CURRENT CARD
-  ---------------------------------------- */
-
-  const currentCard =
-    flashcards[currentIndex];
-
-  const isLastCard =
-    currentIndex ===
-    flashcards.length - 1;
-
-  const progressPercent =
-    Math.round(
-      ((currentIndex + 1) /
-        flashcards.length) *
-        100
-    );
-
-  /* ----------------------------------------
-     MAIN FLASHCARD VIEW
-  ---------------------------------------- */
 
   return (
-    <SafeAreaView
-      style={styles.container}
-    >
-      <Stack.Screen
-        options={{
-          headerShown: false,
-        }}
-      />
-
-      <PullToRefreshScrollView
-        onRefresh={refreshFlashcards}
-        showsVerticalScrollIndicator={
-          false
-        }
-        contentContainerStyle={
-          styles.mainScrollContent
-        }
-      >
-        <Pressable
-          style={styles.backButton}
-          onPress={() =>
-            router.back()
-          }
-        >
-          <Text
-            style={styles.backText}
-          >
-            ← Back
-          </Text>
-        </Pressable>
-
-        <View
-          style={styles.headerRow}
-        >
-          <View
-            style={styles.headerContent}
-          >
-            <Text style={styles.title}>
-              Flashcards
-            </Text>
-
-            <Text
-              style={styles.topicName}
-            >
-              {topicName}
-            </Text>
-          </View>
-
-          <Pressable
-            style={
-              styles.manageTopButton
-            }
-            onPress={() =>
-              setManageMode(true)
-            }
-          >
-            <Text
-              style={
-                styles.manageTopButtonText
-              }
-            >
-              Manage
-            </Text>
-          </Pressable>
+    <SafeAreaView style={ui.container} edges={['top']}>
+      <Stack.Screen options={{ headerShown: false }} />
+      <PullToRefreshScrollView contentContainerStyle={studyStyles.content} showsVerticalScrollIndicator={false} onRefresh={reload}>
+        <ScreenBar backLabel={L('Back', 'Tilbake')} />
+        <View>
+          <Text style={styles.title} accessibilityRole="header">Flashcards</Text>
+          <Text style={styles.subtitle} numberOfLines={1}>{[topicName, subjectName].filter(Boolean).join(' · ')}</Text>
         </View>
-
-        <Text style={styles.subtitle}>
-          Review important information
-          and test your memory.
-        </Text>
-
-        <View
-          style={styles.progressHeader}
-        >
-          <Text
-            style={styles.progressText}
-          >
-            Card {currentIndex + 1} of{' '}
-            {flashcards.length}
-          </Text>
-
-          <Text
-            style={
-              styles.progressPercent
-            }
-          >
-            {progressPercent}%
-          </Text>
-        </View>
-
-        <View
-          style={
-            styles.progressBackground
-          }
-        >
-          <View
-            style={[
-              styles.progressFill,
-              {
-                width: `${progressPercent}%`,
-              },
-            ]}
-          />
-        </View>
-
-        <Pressable
-          style={styles.flashcard}
-          onPress={() =>
-            setShowAnswer(
-              (previous) =>
-                !previous
-            )
-          }
-        >
-          <Text
-            style={styles.cardLabel}
-          >
-            {showAnswer
-              ? 'ANSWER'
-              : 'QUESTION'}
-          </Text>
-
-          <Text
-            style={styles.cardText}
-          >
-            {showAnswer
-              ? currentCard.back
-              : currentCard.front}
-          </Text>
-
-          <Text
-            style={styles.tapText}
-          >
-            {showAnswer
-              ? 'Tap to see the question'
-              : 'Tap to reveal the answer'}
-          </Text>
-        </Pressable>
-
-        {!showAnswer && (
-          <Pressable
-            style={styles.showButton}
-            onPress={() =>
-              setShowAnswer(true)
-            }
-          >
-            <Text
-              style={
-                styles.showButtonText
-              }
-            >
-              Show answer
-            </Text>
-          </Pressable>
-        )}
-
-        {showAnswer && (
-          <Pressable
-            style={styles.nextButton}
-            onPress={handleNext}
-          >
-            <Text
-              style={
-                styles.nextButtonText
-              }
-            >
-              {isLastCard
-                ? 'Finish flashcards'
-                : 'Next flashcard'}
-            </Text>
-          </Pressable>
-        )}
-
-        <View
-          style={styles.infoCard}
-        >
-          <Text
-            style={styles.infoTitle}
-          >
-            Active memory practice
-          </Text>
-
-          <Text
-            style={styles.infoText}
-          >
-            Try to answer the question in
-            your head before revealing the
-            answer. This helps strengthen
-            recall.
-          </Text>
-        </View>
-
-        <Pressable
-          style={styles.reviewShortcut}
-          onPress={() =>
-            router.push({
-              pathname:
-                '/subject/topic/study/review',
-              params: {
-                id: topicId,
-                name: topicName,
-                subjectId: subjectKey,
-              },
-            })
-          }
-        >
-          <Text
-            style={
-              styles.reviewShortcutText
-            }
-          >
-            Review due cards
-          </Text>
-        </Pressable>
-
-        <Pressable
-          style={styles.addShortcut}
-          onPress={openAddModal}
-        >
-          <Text
-            style={
-              styles.addShortcutText
-            }
-          >
-            + Add a flashcard
-          </Text>
-        </Pressable>
-
-        <Pressable
-          style={[styles.aiShortcut, generatingAI && styles.aiButtonDisabled]}
-          disabled={generatingAI}
-          onPress={() => {
-            if (!aiEnabled) Alert.alert('AI flashcards are off', 'Turn them on in Settings → AI preferences.');
-            else setAiPromptVisible(true);
-          }}
-        >
-          {generatingAI ? <ActivityIndicator color={appColor('#327E9D', 'text')} /> : aiEnabled ? <View style={styles.aiActionContent}><StudyIcon name="sparkles" size={17} /><Text style={styles.aiShortcutText}>Generate flashcards with AI</Text></View> : <Text style={styles.aiShortcutText}>AI flashcards are off — open Settings</Text>}
-        </Pressable>
+        {body}
       </PullToRefreshScrollView>
-
-      <Modal
-        visible={modalVisible}
-        transparent
-        animationType="slide"
-        onRequestClose={closeModal}
-      >
-        <KeyboardAvoidingView
-          style={
-            styles.keyboardContainer
-          }
-          behavior={
-            Platform.OS === 'ios'
-              ? 'padding'
-              : 'height'
-          }
-        >
-          <View
-            style={
-              styles.modalOverlay
-            }
-          >
-            <ScrollView
-              style={styles.modalScroll}
-              contentContainerStyle={styles.modalScrollContent}
-              keyboardShouldPersistTaps="handled"
-              keyboardDismissMode={Platform.OS === 'ios' ? 'interactive' : 'on-drag'}
-              automaticallyAdjustKeyboardInsets={Platform.OS === 'ios'}
-            >
-            <View style={styles.modalCard}>
-              <Text
-                style={styles.modalTitle}
-              >
-                {editingCard
-                  ? 'Edit flashcard'
-                  : 'Add flashcard'}
-              </Text>
-
-              <Text
-                style={styles.modalLabel}
-              >
-                Question
-              </Text>
-
-              <TextInput
-                value={frontText}
-                onChangeText={
-                  setFrontText
-                }
-                placeholder="Enter your question..."
-                placeholderTextColor={appColor('#9AAAB4', 'text')}
-                multiline
-                style={styles.input}
-              />
-
-              <Text
-                style={styles.modalLabel}
-              >
-                Answer
-              </Text>
-
-              <TextInput
-                value={backText}
-                onChangeText={
-                  setBackText
-                }
-                placeholder="Enter the answer..."
-                placeholderTextColor={appColor('#9AAAB4', 'text')}
-                multiline
-                style={[
-                  styles.input,
-                  styles.answerInput,
-                ]}
-              />
-
-              <View
-                style={
-                  styles.modalActions
-                }
-              >
-                <Pressable
-                  style={
-                    styles.cancelButton
-                  }
-                  onPress={closeModal}
-                >
-                  <Text
-                    style={
-                      styles.cancelButtonText
-                    }
-                  >
-                    Cancel
-                  </Text>
-                </Pressable>
-
-                <Pressable
-                  style={
-                    styles.saveButton
-                  }
-                  onPress={
-                    handleSaveCard
-                  }
-                >
-                  <Text
-                    style={
-                      styles.saveButtonText
-                    }
-                  >
-                    {editingCard
-                      ? 'Save changes'
-                      : 'Add flashcard'}
-                  </Text>
-                </Pressable>
-              </View>
-            </View>
-            </ScrollView>
-          </View>
-        </KeyboardAvoidingView>
-      </Modal>
-      {aiMaterialModal}
-      {aiPreviewModal}
+      {editor}
+      {aiModal}
     </SafeAreaView>
   );
 }
 
 const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: appColor('#F7FBFE', 'background'),
-    paddingHorizontal: 20,
-  },
-
-  mainScrollContent: {
-    paddingBottom: 40,
-  },
-
-  loadingContainer: {
-    flex: 1,
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-
-  loadingText: {
-    marginTop: 12,
-    fontSize: 15,
-    fontWeight: '600',
-    color: appColor('#66808F', 'text'),
-  },
-
-  emptyContainer: {
-    flex: 1,
-    justifyContent: 'center',
-    alignItems: 'center',
-    paddingHorizontal: 20,
-  },
-
-  emptyTitle: {
-    fontSize: 24,
-    fontWeight: '800',
-    color: appColor('#17324D', 'text'),
-  },
-
-  emptyText: {
-    fontSize: 15,
-    color: appColor('#66808F', 'text'),
-    textAlign: 'center',
-    lineHeight: 22,
-    marginTop: 8,
-    marginBottom: 20,
-  },
-
-  backButton: {
-    marginTop: 12,
-    marginBottom: 24,
-  },
-
-  backText: {
-    fontSize: 15,
-    fontWeight: '600',
-    color: appColor('#43A5D1', 'text'),
-  },
-
-  headerRow: {
-    flexDirection: 'row',
-    alignItems: 'flex-start',
-    justifyContent: 'space-between',
-  },
-
-  headerContent: {
-    flex: 1,
-  },
-
-  title: {
-    fontSize: 30,
-    fontWeight: '800',
-    color: appColor('#17324D', 'text'),
-  },
-
-  finishedTitle: {
-    fontSize: 30,
-    fontWeight: '800',
-    color: appColor('#17324D', 'text'),
-  },
-
-  topicName: {
-    fontSize: 18,
-    fontWeight: '700',
-    color: appColor('#43A5D1', 'text'),
-    marginTop: 6,
-  },
-
-  subtitle: {
-    fontSize: 15,
-    color: appColor('#7A8B99', 'text'),
-    lineHeight: 22,
-    marginTop: 8,
-    marginBottom: 24,
-  },
-
-  manageTopButton: {
-    backgroundColor: appColor('#EAF7FD', 'background'),
-    borderRadius: 14,
-    paddingHorizontal: 13,
-    paddingVertical: 10,
-    marginLeft: 12,
-  },
-
-  manageTopButtonText: {
-    fontSize: 13,
-    fontWeight: '800',
-    color: appColor('#43A5D1', 'text'),
-  },
-
-  progressHeader: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-  },
-
-  progressText: {
-    fontSize: 15,
-    fontWeight: '700',
-    color: appColor('#6F899B', 'text'),
-  },
-
-  progressPercent: {
-    fontSize: 15,
-    fontWeight: '700',
-    color: appColor('#43A5D1', 'text'),
-  },
-
-  progressBackground: {
-    height: 8,
-    borderRadius: 10,
-    backgroundColor: appColor('#DDEFF7', 'background'),
-    overflow: 'hidden',
-    marginTop: 10,
-    marginBottom: 24,
-  },
-
-  progressFill: {
-    height: '100%',
-    backgroundColor: appColor('#69C4E8', 'background'),
-    borderRadius: 10,
-  },
-
-  flashcard: {
-    minHeight: 330,
-    backgroundColor: appColor('#FFFFFF', 'background'),
-    borderRadius: 26,
-    borderWidth: 1,
-    borderColor: appColor('#DDECF3', 'border'),
-    padding: 28,
-    justifyContent: 'center',
-    alignItems: 'center',
-    marginBottom: 18,
-  },
-
-  cardLabel: {
-    fontSize: 13,
-    fontWeight: '800',
-    letterSpacing: 1.2,
-    color: appColor('#43A5D1', 'text'),
-    marginBottom: 20,
-  },
-
-  cardText: {
-    fontSize: 24,
-    lineHeight: 34,
-    fontWeight: '800',
-    color: appColor('#17324D', 'text'),
-    textAlign: 'center',
-  },
-
-  tapText: {
-    position: 'absolute',
-    bottom: 22,
-    fontSize: 12,
-    color: appColor('#91A5B1', 'text'),
-  },
-
-  showButton: {
-    backgroundColor: appColor('#69C4E8', 'background'),
-    borderRadius: 18,
-    paddingVertical: 18,
-    alignItems: 'center',
-    marginBottom: 16,
-  },
-
-  showButtonText: {
-    color: appColor('#FFFFFF', 'text'),
-    fontSize: 17,
-    fontWeight: '800',
-  },
-
-  nextButton: {
-    backgroundColor: appColor('#43A5D1', 'background'),
-    borderRadius: 18,
-    paddingVertical: 18,
-    alignItems: 'center',
-    marginBottom: 16,
-  },
-
-  nextButtonText: {
-    color: appColor('#FFFFFF', 'text'),
-    fontSize: 17,
-    fontWeight: '800',
-  },
-
-  infoCard: {
-    backgroundColor: appColor('#EAF7FD', 'background'),
-    borderRadius: 20,
-    padding: 20,
-    marginTop: 4,
-  },
-
-  infoTitle: {
-    fontSize: 16,
-    fontWeight: '800',
-    color: appColor('#17324D', 'text'),
-  },
-
-  infoText: {
-    fontSize: 13,
-    color: appColor('#66808F', 'text'),
-    lineHeight: 20,
-    marginTop: 7,
-  },
-
-  reviewShortcut: {
-    backgroundColor: appColor('#EAF7FD', 'background'),
-    borderRadius: 18,
-    paddingVertical: 17,
-    alignItems: 'center',
-    marginTop: 16,
-  },
-
-  reviewShortcutText: {
-    fontSize: 15,
-    fontWeight: '800',
-    color: appColor('#43A5D1', 'text'),
-  },
-
-  addShortcut: {
-    alignItems: 'center',
-    marginTop: 16,
-    paddingVertical: 8,
-  },
-
-  addShortcutText: {
-    fontSize: 14,
-    fontWeight: '700',
-    color: appColor('#43A5D1', 'text'),
-  },
-
-  aiShortcut: {
-    alignItems: 'center',
-    marginTop: 8,
-    marginBottom: 12,
-    paddingVertical: 12,
-    borderRadius: 14,
-    backgroundColor: appColor('#EAF7FD', 'background'),
-  },
-
-  aiShortcutText: {
-    fontSize: 14,
-    fontWeight: '800',
-    color: appColor('#327E9D', 'text'),
-  },
-
-  aiActionContent: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 7 },
-
-  manageScrollContent: {
-    paddingBottom: 40,
-  },
-
-  addButton: {
-    backgroundColor: appColor('#43A5D1', 'background'),
-    borderRadius: 18,
-    paddingVertical: 17,
-    alignItems: 'center',
-    marginBottom: 20,
-  },
-
-  addButtonText: {
-    color: appColor('#FFFFFF', 'text'),
-    fontSize: 16,
-    fontWeight: '800',
-  },
-
-  aiButton: {
-    backgroundColor: appColor('#EAF7FD', 'background'),
-    borderRadius: 18,
-    paddingVertical: 16,
-    alignItems: 'center',
-    marginBottom: 20,
-  },
-
-  aiButtonText: {
-    color: appColor('#327E9D', 'text'),
-    fontSize: 15,
-    fontWeight: '800',
-  },
-
-  aiButtonDisabled: {
-    opacity: 0.6,
-  },
-
-  aiModalCard: { backgroundColor: appColor('#FFFFFF', 'background'), borderTopLeftRadius: 28, borderTopRightRadius: 28, padding: 24, paddingBottom: 34 },
-  aiModalCopy: { fontSize: 14, lineHeight: 21, color: appColor('#66808F', 'text'), marginBottom: 13 },
-  aiCountLabel: { color: appColor('#315267', 'text'), fontSize: 13, fontWeight: '700', marginBottom: 8 },
-  aiCountChoices: { flexDirection: 'row', gap: 8, marginBottom: 14 },
-  aiCountChoice: { minWidth: 48, minHeight: 40, borderRadius: 12, borderWidth: 1, borderColor: appColor('#DDECF3', 'border'), backgroundColor: appColor('#F9FCFE', 'background'), alignItems: 'center', justifyContent: 'center', paddingHorizontal: 12 },
-  aiCountChoiceSelected: { borderColor: appColor('#327E9D', 'border'), backgroundColor: appColor('#E4F4F8', 'background') },
-  aiCountChoiceText: { color: appColor('#66808F', 'text'), fontWeight: '700' },
-  aiCountChoiceTextSelected: { color: appColor('#1E647A', 'text') },
-  aiNotes: { minHeight: 150, maxHeight: 240, borderWidth: 1, borderColor: appColor('#DDECF3', 'border'), borderRadius: 16, padding: 14, fontSize: 14, color: appColor('#17324D', 'text'), backgroundColor: appColor('#F9FCFE', 'background'), textAlignVertical: 'top' },
-  aiDraftCard: { padding: 12, borderRadius: 15, backgroundColor: appColor('#F3F8FA', 'background'), marginTop: 12 },
-  aiDraftHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
-  aiDraftRemove: { color: appColor('#A34545', 'text'), fontSize: 12, fontWeight: '800' },
-  aiDraftInput: { minHeight: 55, borderWidth: 1, borderColor: appColor('#DDECF3', 'border'), borderRadius: 12, padding: 11, color: appColor('#17324D', 'text'), backgroundColor: appColor('#FFFFFF', 'background'), textAlignVertical: 'top', marginBottom: 11 },
-  aiDraftAnswer: { minHeight: 65, marginBottom: 0 },
-  aiCaution: { color: appColor('#718493', 'text'), fontSize: 12, lineHeight: 18, marginTop: 9 },
-  aiBusy: { flexDirection: 'row', gap: 10, alignItems: 'center', justifyContent: 'center', marginTop: 18 },
-
-  manageCard: {
-    backgroundColor: appColor('#FFFFFF', 'background'),
-    borderRadius: 22,
-    borderWidth: 1,
-    borderColor: appColor('#E0EDF3', 'border'),
-    padding: 20,
-    marginBottom: 14,
-  },
-
-  manageCardHeader: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    marginBottom: 14,
-  },
-
-  manageCardNumber: {
-    fontSize: 13,
-    fontWeight: '800',
-    color: appColor('#43A5D1', 'text'),
-  },
-
-  manageActions: {
-    flexDirection: 'row',
-    alignItems: 'center',
-  },
-
-  editButton: {
-    backgroundColor: appColor('#EAF7FD', 'background'),
-    borderRadius: 10,
-    paddingHorizontal: 12,
-    paddingVertical: 7,
-    marginRight: 8,
-  },
-
-  editButtonText: {
-    fontSize: 12,
-    fontWeight: '800',
-    color: appColor('#43A5D1', 'text'),
-  },
-
-  deleteButton: {
-    backgroundColor: appColor('#FFF1F1', 'background'),
-    borderRadius: 10,
-    paddingHorizontal: 12,
-    paddingVertical: 7,
-  },
-
-  deleteButtonText: {
-    fontSize: 12,
-    fontWeight: '800',
-    color: appColor('#D95C5C', 'text'),
-  },
-
-  manageQuestion: {
-    fontSize: 17,
-    lineHeight: 25,
-    fontWeight: '800',
-    color: appColor('#17324D', 'text'),
-  },
-
-  manageDivider: {
-    height: 1,
-    backgroundColor: appColor('#EDF3F6', 'background'),
-    marginVertical: 16,
-  },
-
-  manageAnswerLabel: {
-    fontSize: 12,
-    fontWeight: '800',
-    letterSpacing: 0.8,
-    color: appColor('#43A5D1', 'text'),
-    marginBottom: 6,
-  },
-
-  manageAnswer: {
-    fontSize: 14,
-    lineHeight: 21,
-    color: appColor('#66808F', 'text'),
-  },
-
-  emptyManageCard: {
-    backgroundColor: appColor('#FFFFFF', 'background'),
-    borderRadius: 22,
-    borderWidth: 1,
-    borderColor: appColor('#E0EDF3', 'border'),
-    padding: 24,
-    alignItems: 'center',
-  },
-
-  emptyManageTitle: {
-    fontSize: 20,
-    fontWeight: '800',
-    color: appColor('#17324D', 'text'),
-  },
-
-  emptyManageText: {
-    fontSize: 14,
-    lineHeight: 21,
-    color: appColor('#66808F', 'text'),
-    textAlign: 'center',
-    marginTop: 7,
-  },
-
-  keyboardContainer: {
-    flex: 1,
-  },
-
-  modalOverlay: {
-    flex: 1,
-    backgroundColor:
-      'rgba(23, 50, 77, 0.35)',
-    justifyContent: 'flex-end',
-  },
-  modalScroll: { flex: 1 },
-  modalScrollContent: { flexGrow: 1, justifyContent: 'flex-end' },
-
-  modalCard: {
-    backgroundColor: appColor('#FFFFFF', 'background'),
-    borderTopLeftRadius: 28,
-    borderTopRightRadius: 28,
-    padding: 24,
-    paddingBottom: 34,
-  },
-
-  modalTitle: {
-    fontSize: 24,
-    fontWeight: '800',
-    color: appColor('#17324D', 'text'),
-    marginBottom: 22,
-  },
-
-  modalLabel: {
-    fontSize: 14,
-    fontWeight: '800',
-    color: appColor('#17324D', 'text'),
-    marginBottom: 8,
-  },
-
-  input: {
-    minHeight: 90,
-    borderWidth: 1,
-    borderColor: appColor('#DDECF3', 'border'),
-    borderRadius: 16,
-    paddingHorizontal: 15,
-    paddingVertical: 13,
-    fontSize: 15,
-    color: appColor('#17324D', 'text'),
-    textAlignVertical: 'top',
-    marginBottom: 18,
-    backgroundColor: appColor('#F9FCFE', 'background'),
-  },
-
-  answerInput: {
-    minHeight: 110,
-  },
-
-  modalActions: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    marginTop: 4,
-  },
-
-  cancelButton: {
-    width: '32%',
-    backgroundColor: appColor('#EEF4F7', 'background'),
-    borderRadius: 16,
-    paddingVertical: 16,
-    alignItems: 'center',
-  },
-
-  cancelButtonText: {
-    fontSize: 14,
-    fontWeight: '800',
-    color: appColor('#66808F', 'text'),
-  },
-
-  saveButton: {
-    width: '64%',
-    backgroundColor: appColor('#43A5D1', 'background'),
-    borderRadius: 16,
-    paddingVertical: 16,
-    alignItems: 'center',
-  },
-
-  saveButtonText: {
-    fontSize: 14,
-    fontWeight: '800',
-    color: appColor('#FFFFFF', 'text'),
-  },
-
-  finishedScrollContent: {
-    paddingBottom: 40,
-  },
-
-  summaryCard: {
-    backgroundColor: appColor('#FFFFFF', 'background'),
-    borderRadius: 22,
-    borderWidth: 1,
-    borderColor: appColor('#E0EDF3', 'border'),
-    padding: 24,
-    marginBottom: 16,
-  },
-
-  summaryLabel: {
-    fontSize: 15,
-    fontWeight: '700',
-    color: appColor('#43A5D1', 'text'),
-  },
-
-  summaryNumber: {
-    fontSize: 42,
-    fontWeight: '800',
-    color: appColor('#17324D', 'text'),
-    marginTop: 8,
-  },
-
-  summaryText: {
-    fontSize: 15,
-    color: appColor('#66808F', 'text'),
-    lineHeight: 23,
-    marginTop: 8,
-  },
-
-  savedCard: {
-    backgroundColor: appColor('#EAF7FD', 'background'),
-    borderRadius: 20,
-    borderWidth: 1,
-    borderColor: appColor('#BFE7F5', 'border'),
-    padding: 20,
-    marginBottom: 16,
-  },
-
-  savedTitle: {
-    fontSize: 16,
-    fontWeight: '800',
-    color: appColor('#43A5D1', 'text'),
-  },
-
-  savedText: {
-    fontSize: 14,
-    color: appColor('#66808F', 'text'),
-    lineHeight: 21,
-    marginTop: 6,
-  },
-
-  manageSecondaryButton: {
-    borderWidth: 1,
-    borderColor: appColor('#BFE7F5', 'border'),
-    backgroundColor: appColor('#FFFFFF', 'background'),
-    borderRadius: 18,
-    paddingVertical: 17,
-    alignItems: 'center',
-    marginBottom: 16,
-  },
-
-  manageSecondaryButtonText: {
-    fontSize: 16,
-    fontWeight: '800',
-    color: appColor('#43A5D1', 'text'),
-  },
+  title: { color: ink.primary, fontSize: 30, fontWeight: '800', letterSpacing: -0.4 },
+  subtitle: { color: ink.secondary, fontSize: 14, marginTop: 2 },
+  state: { alignItems: 'center', paddingVertical: 60 },
+  wide: { alignSelf: 'stretch' },
+  buttonRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8 },
+  rowTitle: { color: ink.primary, fontSize: 16, fontWeight: '800' },
+  percent: { color: ink.primary, fontSize: 18, fontWeight: '800' },
+  stats: { flexDirection: 'row', alignItems: 'stretch' },
+  stat: { flex: 1, alignItems: 'center', gap: 3 },
+  statDivider: { width: StyleSheet.hairlineWidth, backgroundColor: appColor('#D8E6EC', 'border') },
+  statValue: { color: ink.primary, fontSize: 19, fontWeight: '800' },
+  statLabel: { color: ink.muted, fontSize: 11 },
+  settingLabel: { color: ink.primary, fontSize: 14, fontWeight: '600' },
+  toggle: { flexDirection: 'row', alignItems: 'center', gap: 12 },
+  start: { minHeight: 56, borderRadius: 18 },
+  startText: { color: '#FFFFFF', fontSize: 16, fontWeight: '800' },
+  cardRow: { flexDirection: 'row', alignItems: 'center', gap: 10, padding: 14, borderRadius: 16, backgroundColor: appColor('#FFFFFF', 'background'), borderWidth: 1, borderColor: appColor('#E7F0F4', 'border'), ...cardShadow },
+  cardFront: { color: ink.primary, fontSize: 14, fontWeight: '700', marginBottom: 3 },
+  cardMeta: { color: ink.muted, fontSize: 11, marginTop: 6 },
+  delete: { width: 38, height: 38, borderRadius: 12, alignItems: 'center', justifyContent: 'center', backgroundColor: appColor('#F4F8FA', 'background') },
+
+  modalKeyboard: { flex: 1 },
+  modalScroll: { flexGrow: 1, justifyContent: 'flex-end' },
+  aiScroll: { maxHeight: '92%' },
+  multiline: { minHeight: 76, textAlignVertical: 'top' },
+  generating: { flexDirection: 'row', alignItems: 'center', gap: 10 },
+  draft: { gap: 7, paddingTop: 10, borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: appColor('#D8E6EC', 'border') },
+  draftTop: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
+  draftInput: { minHeight: 44 },
 });

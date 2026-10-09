@@ -1,3 +1,5 @@
+import { cardShadow } from '@/components/gloss';
+import { BackLink } from '@/components/back-link';
 import { LocalizedText as Text } from '@/components/localized-text';
 import PullToRefreshScrollView from '@/components/pull-to-refresh-scroll-view';
 import { StudyIcon, type StudyIconName } from '@/components/study-icon';
@@ -184,16 +186,16 @@ export default function TopicProgressScreen() {
     <SafeAreaView style={styles.container} edges={['top']}>
       <Stack.Screen options={{ headerShown: false }} />
       <PullToRefreshScrollView contentContainerStyle={styles.content} showsVerticalScrollIndicator={false} onRefresh={() => loadData(true)}>
-        <Pressable style={styles.backButton} onPress={() => router.back()}><Text style={styles.backText}>‹  {topicName}</Text></Pressable>
+        <BackLink label={topicName} />
         <Text style={styles.eyebrow}>TOPIC PROGRESS</Text>
         <Text style={styles.title}>{topicName}</Text>
         <Text style={styles.subtitle}>{subject?.name ?? 'Subject'} · Activity and practice saved for this topic.</Text>
 
-        {loading ? <View style={styles.loading}><ActivityIndicator color="#328FB5" /><Text style={styles.bodyText}>Updating saved progress…</Text></View> : <>
+        {loading ? <View style={styles.loading}><ActivityIndicator color="#2A78D6" /><Text style={styles.bodyText}>Updating saved progress…</Text></View> : <>
           {isExamTopic && topicExam && daysUntilExam !== null && daysUntilExam >= 0 ? <View style={styles.examCard}><View style={styles.examIcon}><StudyIcon name="calendar" size={18} /></View><View style={styles.grow}><Text style={styles.examTitle}>Part of the {subject?.name} exam</Text><Text style={styles.examText}>{daysUntilExam === 0 ? 'Exam today' : `${daysUntilExam} days remaining`} · {topicExam.type}</Text></View></View> : null}
 
           <View style={styles.scoreCard}>
-            <View style={styles.scoreHeader}><View><Text style={styles.eyebrow}>RECORDED PRACTICE PROGRESS</Text><Text style={styles.scoreCaption}>Based on methods used and quiz accuracy</Text></View><Text style={styles.scoreValue}>{topicStats?.practiceProgress ?? 0}%</Text></View>
+            <View style={styles.scoreHeader}><View><Text style={styles.eyebrow}>RECORDED PRACTICE PROGRESS</Text><Text style={styles.scoreCaption}>Grows with how much you practise and how well it goes</Text></View><Text style={styles.scoreValue}>{topicStats?.practiceProgress ?? 0}%</Text></View>
             <View style={styles.progressTrack}><View style={[styles.progressFill, { width: `${topicStats?.practiceProgress ?? 0}%` }]} /></View>
             <Text style={styles.footnote}>This is a calculated practice indicator, not a claim of mastery or an exam prediction.</Text>
           </View>
@@ -219,7 +221,7 @@ export default function TopicProgressScreen() {
           </View> : null}
 
           <View style={styles.aiCard}>
-            <View style={styles.sectionHeading}><View style={styles.aiIcon}><StudyIcon name="sparkles" size={19} /></View><View style={styles.grow}><Text style={styles.sectionTitle}>MedExam analysis</Text><Text style={styles.sectionSub}>AI reads only the metrics and rated questions saved for this topic.</Text></View></View>
+            <View style={styles.sectionHeading}><View style={styles.aiIcon}><StudyIcon name="sparkles" size={19} /></View><View style={styles.grow}><Text style={styles.sectionTitle}>Medora analysis</Text><Text style={styles.sectionSub}>AI reads only the metrics and rated questions saved for this topic.</Text></View></View>
             {aiInsight ? <View style={styles.aiInsight}><Text style={styles.aiOverview}>{aiInsight.overview}</Text><Text style={styles.nextStepLabel}>SUGGESTED NEXT STEP</Text><Text style={styles.aiNextStep}>{aiInsight.nextStep}</Text></View> : null}
             {aiError ? <View style={styles.errorBox}><Text style={styles.errorText}>{aiError}</Text><Pressable onPress={() => { void analyzeTopic(); }}><Text style={styles.retryText}>Try again</Text></Pressable></View> : null}
             {!aiInsight ? <Text style={styles.footnote}>The analysis is based on saved activity, your self-ratings, due cards, exam timing and enabled study methods. It will not invent quiz answers.</Text> : null}
@@ -239,7 +241,7 @@ export default function TopicProgressScreen() {
             }) : <View style={styles.emptyHistory}><Text style={styles.sectionSub}>No study activity is saved for this topic yet.</Text></View>}
           </View>
 
-          <Pressable style={styles.primaryButton} onPress={() => router.push({ pathname: '/subject/topic/study', params: { id: topicId, name: topicName, subjectId: String(subject?.id ?? fallbackSubjectId) } })}><StudyIcon name="brain" size={18} color="#FFFFFF" /><Text style={styles.primaryButtonText}>Continue studying</Text></Pressable>
+          <Pressable style={styles.primaryButton} onPress={() => router.push({ pathname: '/subject/topic/[id]', params: { id: topicId, name: topicName, subjectId: String(subject?.id ?? fallbackSubjectId) } })}><StudyIcon name="brain" size={18} color="#FFFFFF" /><Text style={styles.primaryButtonText}>Continue studying</Text></Pressable>
         </>}
       </PullToRefreshScrollView>
     </SafeAreaView>
@@ -261,7 +263,7 @@ const styles = StyleSheet.create({
   examIcon: { width: 35, height: 35, borderRadius: 11, alignItems: 'center', justifyContent: 'center', backgroundColor: appColor('#FFFFFF', 'background') },
   examTitle: { color: appColor('#294D60', 'text'), fontSize: 12, fontWeight: '800' },
   examText: { color: appColor('#668495', 'text'), fontSize: 10, marginTop: 3 },
-  scoreCard: { gap: 10, padding: 15, borderRadius: 18, backgroundColor: appColor('#FFFFFF', 'background'), borderWidth: 1, borderColor: appColor('#E6EDF1', 'border') },
+  scoreCard: { gap: 10, padding: 15, borderRadius: 18, backgroundColor: appColor('#FFFFFF', 'background'), borderWidth: 1, borderColor: appColor('#E6EDF1', 'border'), ...cardShadow },
   scoreHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
   scoreCaption: { color: appColor('#80919C', 'text'), fontSize: 10, marginTop: 3 },
   scoreValue: { color: appColor('#3281A0', 'text'), fontSize: 25, fontWeight: '800' },
@@ -269,12 +271,12 @@ const styles = StyleSheet.create({
   progressFill: { height: '100%', backgroundColor: '#45A1C3', borderRadius: 10 },
   footnote: { color: appColor('#8797A0', 'text'), fontSize: 9, lineHeight: 14 },
   metricsGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
-  metricCard: { width: '48%', flexGrow: 1, padding: 11, borderRadius: 15, backgroundColor: appColor('#FFFFFF', 'background'), borderWidth: 1, borderColor: appColor('#E6EDF1', 'border') },
+  metricCard: { width: '48%', flexGrow: 1, padding: 11, borderRadius: 15, backgroundColor: appColor('#FFFFFF', 'background'), borderWidth: 1, borderColor: appColor('#E6EDF1', 'border'), ...cardShadow },
   metricIcon: { width: 29, height: 29, alignItems: 'center', justifyContent: 'center', borderRadius: 9, backgroundColor: appColor('#EEF7FA', 'background'), marginBottom: 5 },
   metricLabel: { color: appColor('#7A8D99', 'text'), fontSize: 9, fontWeight: '800' },
   metricValue: { color: appColor('#17324D', 'text'), fontSize: 19, fontWeight: '800', marginTop: 2 },
   metricDetail: { color: appColor('#83939D', 'text'), fontSize: 9, lineHeight: 13, marginTop: 3 },
-  responseCard: { gap: 12, padding: 14, borderRadius: 18, backgroundColor: appColor('#FFFFFF', 'background'), borderWidth: 1, borderColor: appColor('#E6EDF1', 'border') },
+  responseCard: { gap: 12, padding: 14, borderRadius: 18, backgroundColor: appColor('#FFFFFF', 'background'), borderWidth: 1, borderColor: appColor('#E6EDF1', 'border'), ...cardShadow },
   sectionHeading: { flexDirection: 'row', alignItems: 'center', gap: 9 },
   sectionIcon: { width: 34, height: 34, alignItems: 'center', justifyContent: 'center', backgroundColor: appColor('#EFF7FA', 'background'), borderRadius: 11 },
   sectionTitle: { color: appColor('#17324D', 'text'), fontSize: 14, fontWeight: '800' },
@@ -299,7 +301,7 @@ const styles = StyleSheet.create({
   errorBox: { padding: 10, borderRadius: 11, backgroundColor: appColor('#FFF2F0', 'background') },
   errorText: { color: appColor('#9B3C34', 'text'), fontSize: 10, lineHeight: 15 },
   retryText: { color: appColor('#327E9D', 'text'), fontSize: 10, fontWeight: '800', marginTop: 5 },
-  historyCard: { gap: 8, padding: 14, borderRadius: 18, backgroundColor: appColor('#FFFFFF', 'background'), borderWidth: 1, borderColor: appColor('#E6EDF1', 'border') },
+  historyCard: { gap: 8, padding: 14, borderRadius: 18, backgroundColor: appColor('#FFFFFF', 'background'), borderWidth: 1, borderColor: appColor('#E6EDF1', 'border'), ...cardShadow },
   historyRow: { flexDirection: 'row', alignItems: 'center', gap: 9, paddingVertical: 6, borderTopWidth: 1, borderTopColor: appColor('#EDF1F3', 'border') },
   historyIcon: { width: 29, height: 29, alignItems: 'center', justifyContent: 'center', borderRadius: 9, backgroundColor: appColor('#F0F7F9', 'background') },
   historyTitle: { color: appColor('#29495D', 'text'), fontSize: 11, fontWeight: '700' },

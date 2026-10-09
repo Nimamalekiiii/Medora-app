@@ -3,9 +3,14 @@ import type { Session } from '@supabase/supabase-js';
 import { AppState } from 'react-native';
 
 import { notifyLocalDataChanged, subscribeToLocalDataChanges } from './cloud-sync-state';
+import { forgetDeviceAccount, switchDeviceAccount } from './device-account';
 import { getSupabaseClient } from './supabase';
+import { reconcileExamReminders } from './study-reminder';
 import {
   createStudyDataBackup,
+  getAccountStorageKeys,
+  getExamsBySubject,
+  getSubjects,
   restoreStudyDataBackup,
   type StudyDataBackup,
 } from './storage';
@@ -34,6 +39,66 @@ let syncing = false;
 let needsInitialChoice = false;
 let suppressedChanges = 0;
 let debounce: ReturnType<typeof setTimeout> | undefined;
+let ownerQueue: Promise<void> = Promise.resolve();
+
+/** Everything on the device that belongs to one account: study data, its recovery copy and unsynced-change state. */
+function accountKeys() {
+  return [...getAccountStorageKeys(), DIRTY_KEY, 'medexam_ai_progress_review', 'medexam_active_focus_session'];
+}
+
+/**
+ * Makes sure the study data on the device belongs to the account that is
+ * signed in. When a different account signs in, the previous account's data
+ * is put away and this account's data is brought out, so two people who
+ * share a phone never see each other's subjects, notes or results.
+ */
+async function ensureDeviceOwner(userId: string) {
+  const owner = await AsyncStorage.getItem(OWNER_KEY);
+  if (owner === userId) return;
+  if (!owner) {
+    // First sign-in on this device. Data already here is handled by the sync's own choice step.
+    await AsyncStorage.setItem(OWNER_KEY, userId);
+    return;
+  }
+  suppressedChanges += 1;
+  try {
+    await switchDeviceAccount(AsyncStorage, owner, userId, accountKeys());
+    await AsyncStorage.setItem(OWNER_KEY, userId);
+    await AsyncStorage.removeItem(LINK_REQUIRED_KEY);
+    needsInitialChoice = false;
+    // Screens reload with the right account's data; this is not a change to upload.
+    notifyLocalDataChanged();
+    const [exams, subjects] = await Promise.all([getExamsBySubject(), getSubjects()]);
+    void reconcileExamReminders(exams, subjects).catch((error) => console.warn('Exam reminders could not be refreshed:', error));
+  } finally {
+    suppressedChanges -= 1;
+  }
+}
+
+/** Runs the owner check one at a time, so two sign-in events cannot both switch the data. */
+function adoptSession(session: Session | null, delay = 500) {
+  ownerQueue = ownerQueue
+    .then(async () => { if (session) await ensureDeviceOwner(session.user.id); })
+    .catch((error) => console.warn('Could not prepare this device for the signed-in account:', error))
+    .then(() => {
+      currentSession = session;
+      announceStatusChange();
+      if (session) scheduleAutoSync(delay);
+    });
+}
+
+/** Removes an account's study data from this device, after the account itself has been deleted. */
+export async function forgetAccountOnDevice(userId: string) {
+  suppressedChanges += 1;
+  try {
+    await forgetDeviceAccount(AsyncStorage, userId, accountKeys());
+    await AsyncStorage.multiRemove([OWNER_KEY, LINK_REQUIRED_KEY, CLOUD_RECOVERY_KEY, metaKey(userId)]);
+    notifyLocalDataChanged();
+    void reconcileExamReminders({}, []).catch((error) => console.warn('Exam reminders could not be cleared:', error));
+  } finally {
+    suppressedChanges -= 1;
+  }
+}
 const statusListeners = new Set<() => void>();
 
 function metaKey(userId: string) {
@@ -92,15 +157,11 @@ export function initializeCloudSync() {
   });
 
   const { data: authListener } = client.auth.onAuthStateChange((_event, session) => {
-    currentSession = session;
-    announceStatusChange();
-    if (session) scheduleAutoSync(500);
+    adoptSession(session);
   });
 
   void client.auth.getSession().then(({ data }) => {
-    currentSession = data.session;
-    if (currentSession) scheduleAutoSync(500);
-    announceStatusChange();
+    adoptSession(data.session);
   }).catch((error) => console.warn('Could not restore Supabase session:', error));
 
   return () => {
@@ -148,7 +209,7 @@ async function localBackupHasContent(backup: StudyDataBackup) {
     'medexam_subjects', 'medexam_topics_by_subject', 'medexam_exams_by_subject',
     'medexam_study_plans_by_subject', 'medexam_study_activity', 'medexam_quiz_results',
     'medexam_flashcards', 'medexam_flashcard_reviews', 'medexam_active_recall_questions',
-    'medexam_generated_quizzes_by_topic',
+    'medexam_generated_quizzes_by_topic', 'medexam_topic_notes',
   ];
   return contentKeys.some((key) => {
     const value = backup.data[key];
@@ -215,11 +276,11 @@ export async function syncStudyData(mode: SyncMode = 'auto'): Promise<SyncResult
   const client = getSupabaseClient();
   if (!client) return 'not-configured';
   const userId = currentSession?.user.id;
-  if (!userId) throw new Error('Sign in to your Supabase account before syncing.');
+  if (!userId) throw new Error('Sign in to your account before syncing.');
   if (syncing) throw new Error('A cloud sync is already in progress. Please wait.');
   const owner = await AsyncStorage.getItem(OWNER_KEY);
   if (owner && owner !== userId) {
-    throw new Error('This device is linked to a different Supabase account. Sign in with the linked account, or disconnect it from Profile before switching accounts.');
+    throw new Error('This device is linked to a different account. Sign out and sign in again to switch accounts.');
   }
   if (mode === 'auto' && (await AsyncStorage.getItem(LINK_REQUIRED_KEY)) === '1') {
     needsInitialChoice = true;

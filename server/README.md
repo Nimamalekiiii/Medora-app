@@ -1,4 +1,4 @@
-# MedExam AI server
+# Medora AI server
 
 The app uses this server for AI study suggestions, quizzes, flashcards, Active Recall, and progress analysis. Keep the OpenAI key here; never put it in an `EXPO_PUBLIC_*` variable. Every AI request requires a valid Supabase user session. The server verifies the access token with Supabase Auth and applies per-user request limits.
 
@@ -17,10 +17,10 @@ Configure these server variables in the hosting provider's secret/environment se
 
 - `OPENAI_API_KEY`: private OpenAI API key.
 - `OPENAI_MODEL`: model available to your OpenAI project.
-- `SUPABASE_URL`: MedExam's Supabase project URL.
+- `SUPABASE_URL`: Medora's Supabase project URL.
 - `SUPABASE_PUBLISHABLE_KEY`: the project's publishable key. Never use `service_role` or a secret key.
 - `AI_MAX_REQUESTS_PER_DAY`: optional per-user daily cap; defaults to 30.
 
 The `/health` endpoint reports `configured: true` only when all required server values are present. Use HTTPS for the public endpoint and set that exact base URL in the app's `.env.local`. The request counter is held in process memory, so use a single server instance unless you replace it with shared rate-limit storage.
 
-AI requests are made only after choosing **Generate with AI** on a topic. Requests can incur OpenAI API charges. Quiz and flashcard notes are sent to OpenAI to create study material; the server requests that responses are not stored.
+AI requests are made only after choosing **Generate with AI** on a topic. Choosing **Import notes from a PDF** sends that PDF (up to 10 MB) to OpenAI to be turned into study notes, which the student can edit before generating. Requests can incur OpenAI API charges. Quiz and flashcard notes are sent to OpenAI to create study material; the server requests that responses are not stored.

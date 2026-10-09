@@ -34,7 +34,7 @@ const DEFAULTS: StudyReminderPreferences = {
 
 export class ReminderPermissionError extends Error {
   constructor() {
-    super('Notifications are turned off for MedExam. Turn them on in your device Settings, then try again.');
+    super('Notifications are turned off for Medora. Turn them on in your device Settings, then try again.');
     this.name = 'ReminderPermissionError';
   }
 }
@@ -98,7 +98,7 @@ async function scheduledDaily(reminder: StudyReminderPreferences) {
     for (const time of reminder.times) {
       const { hour, minute } = parseTime(time);
       ids.push(await Notifications.scheduleNotificationAsync({
-        content: { title: 'Your MedExam study reminder', body: `Make time for ${reasons.join(', ')} today.`, sound: false, data: { medexam: 'daily-study', time } },
+        content: { title: 'Your Medora study reminder', body: `Make time for ${reasons.join(', ')} today.`, sound: false, data: { medexam: 'daily-study', time } },
         trigger: { type: Notifications.SchedulableTriggerInputTypes.DAILY, hour, minute, ...(Platform.OS === 'android' ? { channelId: ANDROID_CHANNEL_ID } : {}) },
       }));
     }
@@ -136,7 +136,7 @@ async function scheduleExamNotifications(exams: Record<string, ExamRecord>, subj
         const id = await Notifications.scheduleNotificationAsync({
           content: {
             title: lead === 0 ? `${name} exam is today` : `${name} exam is coming up`,
-            body: lead === 0 ? 'Your exam date is today. Open MedExam to review your plan.' : `${lead} ${lead === 1 ? 'day' : 'days'} left. Open MedExam to review your study plan.`,
+            body: lead === 0 ? 'Your exam date is today. Open Medora to review your plan.' : `${lead} ${lead === 1 ? 'day' : 'days'} left. Open Medora to review your study plan.`,
             sound: false,
             data: { medexam: 'exam', subjectId, examDate: exam.date, daysBefore: lead },
           },
@@ -236,7 +236,7 @@ export async function sendTestStudyReminder() {
   await prepareAndroidChannel();
   await requestNotificationPermission();
   await Notifications.scheduleNotificationAsync({
-    content: { title: 'MedExam test reminder', body: 'Notifications are working. Your study reminder is ready.', sound: false },
+    content: { title: 'Medora test reminder', body: 'Notifications are working. Your study reminder is ready.', sound: false },
     trigger: { type: Notifications.SchedulableTriggerInputTypes.TIME_INTERVAL, seconds: 5, ...(Platform.OS === 'android' ? { channelId: ANDROID_CHANNEL_ID } : {}) },
   });
 }

@@ -8,7 +8,6 @@ import type {
   StudyRecommendation,
   PreparationAnalysis,
   Flashcard,
-  FlashcardReview,
 } from '../types/study';
 
 /**
@@ -495,45 +494,6 @@ export function getDueFlashcards(
       );
     }
   );
-}
-
-/**
- * ----------------------------------------
- * FLASHCARD INTERVAL
- * ----------------------------------------
- *
- * Simple first version of spaced repetition.
- *
- * Again -> tomorrow
- * Hard  -> 2 days
- * Good  -> 4 days
- * Easy  -> 7 days
- *
- * Later this can become a more advanced
- * algorithm based on previous performance.
- */
-export function calculateNextReviewDate(
-  rating: FlashcardReview['rating'],
-  fromDate = new Date()
-): string {
-  const daysByRating = {
-    again: 1,
-    hard: 2,
-    good: 4,
-    easy: 7,
-  };
-
-  const days =
-    daysByRating[rating];
-
-  const nextDate =
-    new Date(fromDate);
-
-  nextDate.setDate(
-    nextDate.getDate() + days
-  );
-
-  return nextDate.toISOString();
 }
 
 /**

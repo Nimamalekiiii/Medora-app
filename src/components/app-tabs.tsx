@@ -2,19 +2,19 @@ import { appColor } from '@/constants/adaptive-color';
 import { NativeTabs } from 'expo-router/unstable-native-tabs';
 import { useColorScheme } from 'react-native';
 
-import { Colors } from '@/constants/theme';
+import { theme } from '@/constants/adaptive-color';
 import { useAppSettings } from '@/services/app-settings-context';
 import { tr } from '@/services/localization';
 
 export default function AppTabs() {
   const scheme = useColorScheme();
   const { preferences } = useAppSettings();
-  const colors = Colors[scheme === 'unspecified' ? 'light' : scheme];
+  const colors = scheme === 'dark' ? theme.dark : theme.light;
 
   return (
     <NativeTabs
-      backgroundColor={colors.background}
-      indicatorColor="#D9F3FF"
+      backgroundColor={colors.page}
+      indicatorColor={colors.tint}
       labelStyle={{
         selected: {
           color: appColor('#4AA9D8', 'text'),

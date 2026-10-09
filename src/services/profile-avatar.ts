@@ -71,7 +71,7 @@ export async function saveProfileAvatar(userId: string, sourceUri: string, mimeT
     try {
       const { data: { session }, error: sessionError } = await client.auth.getSession();
       if (sessionError) throw sessionError;
-      if (session?.user.id !== userId) throw new Error('Sign in to the same MedExam account before syncing the profile picture.');
+      if (session?.user.id !== userId) throw new Error('Sign in to the same Medora account before syncing the profile picture.');
       const path = `${userId}/avatar-${Date.now()}.${extension}`;
       const fileBytes = await fetch(destination.uri).then((response) => {
         if (!response.ok) throw new Error('The selected image could not be read for cloud sync.');
@@ -90,7 +90,7 @@ export async function saveProfileAvatar(userId: string, sourceUri: string, mimeT
       cloudMessage = error instanceof Error ? error.message : 'The photo was saved on this device, but cloud sync did not finish.';
     }
   } else {
-    cloudMessage = 'The photo is saved on this device. Connect Supabase to sync it to other devices.';
+    cloudMessage = 'The photo is saved on this device. Sign in to sync it to other devices.';
   }
   return { uri: destination.uri, cloudSynced, cloudMessage };
 }

@@ -1,4 +1,6 @@
+import { BackLink } from '@/components/back-link';
 import { LocalizedText as Text } from '@/components/localized-text';
+import { StudyIcon } from '@/components/study-icon';
 import { appColor } from '@/constants/adaptive-color';
 import { useCallback, useEffect, useState } from 'react';
 import { useRouter } from 'expo-router';
@@ -70,17 +72,17 @@ export default function SettingsScreen() {
     try {
       const backup = await createStudyDataBackup();
       if (Platform.OS === 'web') {
-        await Share.share({ title: 'MedExam study backup', message: JSON.stringify(backup) });
+        await Share.share({ title: 'Medora study backup', message: JSON.stringify(backup) });
         return;
       }
       if (!await Sharing.isAvailableAsync()) throw new Error('File sharing is unavailable on this device.');
-      const filename = `MedExam-backup-${new Date().toISOString().replace(/[:.]/g, '-')}.json`;
+      const filename = `Medora-backup-${new Date().toISOString().replace(/[:.]/g, '-')}.json`;
       const file = new File(Paths.cache, filename);
       file.create({ intermediates: true, overwrite: true });
       file.write(JSON.stringify(backup, null, 2));
-      await Sharing.shareAsync(file.uri, { mimeType: 'application/json', dialogTitle: 'Save or share your MedExam backup', UTI: 'public.json' });
+      await Sharing.shareAsync(file.uri, { mimeType: 'application/json', dialogTitle: 'Save or share your Medora backup', UTI: 'public.json' });
     } catch {
-      Alert.alert('Backup failed', 'MedExam could not prepare the backup. Your saved study data was not changed.');
+      Alert.alert('Backup failed', 'Medora could not prepare the backup. Your saved study data was not changed.');
     } finally { setBusy(false); }
   }
 
@@ -94,7 +96,7 @@ export default function SettingsScreen() {
       if (result.canceled) return;
       const asset = result.assets[0];
       if (!asset) throw new Error('No backup file was selected.');
-      if (asset.size && asset.size > 15 * 1024 * 1024) throw new Error('This backup is over 15 MB. Choose a smaller MedExam backup.');
+      if (asset.size && asset.size > 15 * 1024 * 1024) throw new Error('This backup is over 15 MB. Choose a smaller Medora backup.');
       const contents = await new File(asset.uri).text();
       const summary = inspectStudyDataBackup(contents);
       setBackupText(contents);
@@ -103,7 +105,7 @@ export default function SettingsScreen() {
       setManualRestoreVisible(false);
       setRestoreVisible(true);
     } catch (error) {
-      Alert.alert('Could not open this backup', error instanceof Error ? error.message : 'Choose a valid MedExam JSON backup file.');
+      Alert.alert('Could not open this backup', error instanceof Error ? error.message : 'Choose a valid Medora JSON backup file.');
     }
   }
 
@@ -128,16 +130,16 @@ export default function SettingsScreen() {
       await restoreStudyDataBackup(backupText);
       closeRestoreModal();
       await refreshCloudState();
-      Alert.alert('Backup restored', 'Your study data has been restored. MedExam saved what was on this device first, so you can undo this restore from Settings → Recovery options.');
+      Alert.alert('Backup restored', 'Your study data has been restored. Medora saved what was on this device first, so you can undo this restore from Settings → Recovery options.');
     } catch (error) {
-      Alert.alert('Could not restore backup', error instanceof Error ? error.message : 'Check that this is a MedExam backup.');
+      Alert.alert('Could not restore backup', error instanceof Error ? error.message : 'Check that this is a Medora backup.');
     } finally { setBusy(false); }
   }
 
   function confirmRestoreBackup() {
     if (!backupSummary) return;
     const details = `${backupSummary.subjectCount} subjects · ${backupSummary.topicCount} topics · ${backupSummary.flashcardCount} flashcards · ${backupSummary.studySessionCount} study sessions · ${backupSummary.quizResultCount} quiz results`;
-    Alert.alert('Restore this backup?', `${details}\n\nThis replaces the study data on this device. MedExam first saves a recovery copy of what is here now, which you can restore from Settings → Recovery options.`, [
+    Alert.alert('Restore this backup?', `${details}\n\nThis replaces the study data on this device. Medora first saves a recovery copy of what is here now, which you can restore from Settings → Recovery options.`, [
       { text: 'Cancel', style: 'cancel' },
       { text: 'Restore backup', style: 'destructive', onPress: () => { void restoreBackup(); } },
     ]);
@@ -164,7 +166,7 @@ export default function SettingsScreen() {
       const { error } = await auth.updateUser({ email: nextEmail });
       if (error) throw error;
       setEmailVisible(false);
-      Alert.alert('Confirm your new email', 'Supabase may send a confirmation link before this becomes the sign-in email. Your current address stays active until the change is confirmed.');
+      Alert.alert('Confirm your new email', 'You may get a confirmation link before this becomes the sign-in email. Your current address stays active until the change is confirmed.');
     } catch (error) {
       Alert.alert('Could not update email', error instanceof Error ? error.message : 'Check your connection and try again.');
     } finally { setBusy(false); }
@@ -188,14 +190,14 @@ export default function SettingsScreen() {
       setCurrentPassword('');
       setNewPassword('');
       setConfirmNewPassword('');
-      Alert.alert('Password changed', 'Your MedExam sign-in password has been updated.');
+      Alert.alert('Password changed', 'Your Medora sign-in password has been updated.');
     } catch (error) {
       Alert.alert('Could not change password', error instanceof Error ? error.message : 'Check your connection and try again.');
     } finally { setBusy(false); }
   }
 
   function switchCloudAccount() {
-    Alert.alert('Switch Supabase account?', 'This device will disconnect from the current account, but its cloud copy will remain there. Local study data stays on this device. When you sign in to another account, MedExam will ask which copy to keep before syncing.', [
+    Alert.alert('Switch account?', 'This device will disconnect from the current account, but its cloud copy will remain there. Local study data stays on this device. When you sign in to another account, Medora will ask which copy to keep before syncing.', [
       { text: 'Cancel', style: 'cancel' },
       { text: 'Disconnect and sign out', style: 'destructive', onPress: () => {
         setBusy(true);
@@ -216,7 +218,7 @@ export default function SettingsScreen() {
           { text: 'Upload this device', onPress: () => { void syncCloud('push'); } },
         ]);
       } else if (result === 'conflict') {
-        Alert.alert('Choose which copy to keep', 'There is study data on both this device and Supabase, or another device has changed the cloud copy. Nothing was overwritten.', [
+        Alert.alert('Choose which copy to keep', 'There is study data on both this device and in your account, or another device has changed the cloud copy. Nothing was overwritten.', [
           { text: 'Cancel', style: 'cancel' },
           { text: 'Restore cloud copy', onPress: () => { void syncCloud('pull'); } },
           { text: 'Replace cloud copy', style: 'destructive', onPress: () => { void syncCloud('push'); } },
@@ -224,11 +226,11 @@ export default function SettingsScreen() {
       } else if (result === 'no-cloud-backup') {
         Alert.alert('No cloud copy yet', 'Sync this device first to create the cloud backup.');
       } else if (result === 'not-configured') {
-        Alert.alert('Cloud backup is not configured', 'Add your Supabase project URL and publishable key to .env.local, then restart Expo.');
+        Alert.alert('Cloud backup is not configured', 'Cloud backup is not available in this version of the app.');
       } else if (result === 'downloaded') {
         Alert.alert('Cloud copy restored', 'The cloud study data is now on this device. A recovery copy of the previous local data was saved.');
       } else if (result === 'synced') {
-        Alert.alert('Cloud backup updated', 'Your study data has been saved to Supabase.');
+        Alert.alert('Cloud backup updated', 'Your study data has been saved to your account.');
       } else if (result === 'up-to-date') {
         Alert.alert('Everything is up to date', 'Your local and cloud study data match.');
       }
@@ -242,7 +244,7 @@ export default function SettingsScreen() {
     setBusy(true);
     try {
       const result = await restorePreviousCloudBackup();
-      Alert.alert(result === 'synced' ? 'Previous cloud copy restored' : 'No previous cloud copy', result === 'synced' ? 'The version from before the last replacement is back in Supabase. The version it replaced can now be restored from Settings too.' : 'There is no saved cloud recovery copy for this account.');
+      Alert.alert(result === 'synced' ? 'Previous cloud copy restored' : 'No previous cloud copy', result === 'synced' ? 'The version from before the last replacement is back in your account. The version it replaced can now be restored from Settings too.' : 'There is no saved cloud recovery copy for this account.');
       await refreshCloudState();
     } catch (error) {
       Alert.alert('Could not restore cloud copy', error instanceof Error ? error.message : 'Please try again.');
@@ -252,7 +254,7 @@ export default function SettingsScreen() {
   return <SafeAreaView style={styles.screen}>
     <PullToRefreshScrollView contentContainerStyle={styles.content} onRefresh={refreshCloudState}>
       <View style={styles.settingsHeader}>
-        <Pressable accessibilityRole="button" accessibilityLabel="Back to Profile" onPress={() => router.back()} style={styles.backButton}><Text style={styles.backButtonText}>‹  Profile</Text></Pressable>
+        <BackLink label="Profile" />
         <Text style={styles.eyebrow}>SETTINGS</Text>
         <Text style={styles.title}>Data & account</Text>
         <Text style={styles.subtitle}>Backups, cloud sync and account access.</Text>
@@ -261,37 +263,37 @@ export default function SettingsScreen() {
         <Text style={styles.groupTitle}>Study data & backups</Text>
         <Text style={styles.groupDescription}>Subjects, topics, flashcards, notes and study activity are saved on this device as you work. These tools make a portable copy or recover an earlier one.</Text>
         <View style={styles.backupInfo}><Text style={styles.backupInfoTitle}>What is included?</Text><Text style={styles.copy}>Study content and progress such as subjects, topics, flashcards, quizzes and study sessions. Sign-in details and passwords are never included.</Text></View>
-        <Pressable accessibilityRole="button" style={styles.action} disabled={busy} onPress={exportBackup}><Text style={styles.actionIcon}>↗</Text><View style={{ flex: 1 }}><Text style={styles.actionTitle}>Export backup</Text><Text style={styles.copy}>Create a separate copy to keep in Files or share securely</Text></View><Text style={styles.arrow}>›</Text></Pressable>
-        <Pressable accessibilityRole="button" style={styles.action} disabled={busy} onPress={() => { void pickBackupFile(); }}><Text style={styles.actionIcon}>↓</Text><View style={{ flex: 1 }}><Text style={styles.actionTitle}>Restore a backup</Text><Text style={styles.copy}>Choose a backup file, check what is inside, then confirm</Text></View><Text style={styles.arrow}>›</Text></Pressable>
+        <Pressable accessibilityRole="button" style={styles.action} disabled={busy} onPress={exportBackup}><View style={styles.iconSlot}><StudyIcon name="upload" size={20} /></View><View style={{ flex: 1 }}><Text style={styles.actionTitle}>Export backup</Text><Text style={styles.copy}>Create a separate copy to keep in Files or share securely</Text></View><StudyIcon name="chevron" size={13} color={appColor('#9AADB8', 'text')} /></Pressable>
+        <Pressable accessibilityRole="button" style={styles.action} disabled={busy} onPress={() => { void pickBackupFile(); }}><View style={styles.iconSlot}><StudyIcon name="download" size={20} /></View><View style={{ flex: 1 }}><Text style={styles.actionTitle}>Restore a backup</Text><Text style={styles.copy}>Choose a backup file, check what is inside, then confirm</Text></View><StudyIcon name="chevron" size={13} color={appColor('#9AADB8', 'text')} /></Pressable>
         <Pressable accessibilityRole="button" style={[styles.disclosure, backupOptionsExpanded && styles.disclosureOpen]} onPress={() => setBackupOptionsExpanded((value) => !value)}>
           <Text style={styles.disclosureText}>Recovery options</Text><Text style={styles.disclosureChevron}>{backupOptionsExpanded ? '−' : '+'}</Text>
         </Pressable>
-        {backupOptionsExpanded && <Pressable accessibilityRole="button" style={styles.action} disabled={busy} onPress={undoLastChange}><Text style={styles.actionIcon}>↶</Text><View style={{ flex: 1 }}><Text style={styles.actionTitle}>Undo last restore or deletion</Text><Text style={styles.copy}>Bring back the recovery copy saved beforehand</Text></View><Text style={styles.arrow}>›</Text></Pressable>}
+        {backupOptionsExpanded && <Pressable accessibilityRole="button" style={styles.action} disabled={busy} onPress={undoLastChange}><View style={styles.iconSlot}><StudyIcon name="undo" size={20} /></View><View style={{ flex: 1 }}><Text style={styles.actionTitle}>Undo last restore or deletion</Text><Text style={styles.copy}>Bring back the recovery copy saved beforehand</Text></View><StudyIcon name="chevron" size={13} color={appColor('#9AADB8', 'text')} /></Pressable>}
       </View>
 
       <View style={styles.groupCard}>
         <Text style={styles.groupTitle}>Cloud sync</Text>
         <Text style={styles.groupDescription}>A private online copy linked to the signed-in account. Use Sync now to save pending changes or bring the same study data to another device. Local study data stays available on this device too.</Text>
-        {!cloudConfigured ? <View style={styles.info}><Text style={styles.infoIcon}>☁️</Text><View style={{ flex: 1 }}><Text style={styles.infoTitle}>Supabase setup needed</Text><Text style={styles.copy}>Add your project URL and publishable key to .env.local, then restart Expo.</Text></View></View> : accountSummary.signedIn ? <>
-          <View style={styles.info}><Text style={styles.infoIcon}>☁️</Text><View style={{ flex: 1 }}><Text style={styles.infoTitle}>{accountSummary.email || session?.user.email || 'Signed in to Supabase'}</Text><Text style={styles.copy}>{accountSummary.accountMismatch ? 'This device is linked to another account. Sync is paused to protect both accounts’ study data.' : accountSummary.needsInitialChoice ? 'Choose which copy to keep before syncing; nothing has been overwritten.' : accountSummary.dirty ? 'New changes are waiting to sync.' : accountSummary.syncedAt ? `Last synced ${new Date(accountSummary.syncedAt).toLocaleString()}.` : 'Your first sync will create or restore a cloud copy.'}</Text></View></View>
-          <Pressable accessibilityRole="button" style={styles.action} disabled={busy || accountSummary.accountMismatch} onPress={() => { void syncCloud('auto'); }}><Text style={styles.actionIcon}>⟳</Text><View style={{ flex: 1 }}><Text style={styles.actionTitle}>{accountSummary.needsInitialChoice ? 'Review sync choices' : accountSummary.dirty ? 'Sync pending changes' : 'Sync now'}</Text><Text style={styles.copy}>Save safely or resolve a conflict</Text></View><Text style={styles.arrow}>›</Text></Pressable>
+        {!cloudConfigured ? <View style={styles.info}><View style={styles.iconSlot}><StudyIcon name="cloud" size={22} /></View><View style={{ flex: 1 }}><Text style={styles.infoTitle}>Cloud backup is not available</Text><Text style={styles.copy}>This version of the app keeps your study data on this device only.</Text></View></View> : accountSummary.signedIn ? <>
+          <View style={styles.info}><View style={styles.iconSlot}><StudyIcon name="cloud" size={22} /></View><View style={{ flex: 1 }}><Text style={styles.infoTitle}>{accountSummary.email || session?.user.email || 'Signed in'}</Text><Text style={styles.copy}>{accountSummary.accountMismatch ? 'This device is linked to another account. Sync is paused to protect both accounts’ study data.' : accountSummary.needsInitialChoice ? 'Choose which copy to keep before syncing; nothing has been overwritten.' : accountSummary.dirty ? 'New changes are waiting to sync.' : accountSummary.syncedAt ? `Last synced ${new Date(accountSummary.syncedAt).toLocaleString()}.` : 'Your first sync will create or restore a cloud copy.'}</Text></View></View>
+          <Pressable accessibilityRole="button" style={styles.action} disabled={busy || accountSummary.accountMismatch} onPress={() => { void syncCloud('auto'); }}><View style={styles.iconSlot}><StudyIcon name="review" size={20} /></View><View style={{ flex: 1 }}><Text style={styles.actionTitle}>{accountSummary.needsInitialChoice ? 'Review sync choices' : accountSummary.dirty ? 'Sync pending changes' : 'Sync now'}</Text><Text style={styles.copy}>Save safely or resolve a conflict</Text></View><StudyIcon name="chevron" size={13} color={appColor('#9AADB8', 'text')} /></Pressable>
           <Pressable accessibilityRole="button" style={[styles.disclosure, cloudOptionsExpanded && styles.disclosureOpen]} onPress={() => setCloudOptionsExpanded((value) => !value)}>
             <Text style={styles.disclosureText}>More sync options</Text><Text style={styles.disclosureChevron}>{cloudOptionsExpanded ? '−' : '+'}</Text>
           </Pressable>
           {cloudOptionsExpanded && <>
-            <Pressable accessibilityRole="button" style={styles.action} disabled={busy || accountSummary.accountMismatch} onPress={() => Alert.alert('Restore cloud copy?', 'The cloud copy will replace the study data on this device. A recovery copy will be saved first.', [{ text: 'Cancel', style: 'cancel' }, { text: 'Restore cloud', style: 'destructive', onPress: () => { void syncCloud('pull'); } }])}><Text style={styles.actionIcon}>↓</Text><View style={{ flex: 1 }}><Text style={styles.actionTitle}>Restore cloud copy</Text><Text style={styles.copy}>Replace local data after creating a recovery copy</Text></View><Text style={styles.arrow}>›</Text></Pressable>
-            <Pressable accessibilityRole="button" style={styles.action} disabled={busy || accountSummary.accountMismatch} onPress={() => Alert.alert('Replace cloud copy?', 'This replaces the existing cloud backup with the data on this device. Continue only if this is the copy you want to keep.', [{ text: 'Cancel', style: 'cancel' }, { text: 'Replace cloud', style: 'destructive', onPress: () => { void syncCloud('push'); } }])}><Text style={styles.actionIcon}>↗</Text><View style={{ flex: 1 }}><Text style={styles.actionTitle}>Replace cloud with this device</Text><Text style={styles.copy}>Use this device as the copy to keep</Text></View><Text style={styles.arrow}>›</Text></Pressable>
-            {accountSummary.hasCloudRecovery && !accountSummary.accountMismatch && <Pressable accessibilityRole="button" style={styles.action} disabled={busy} onPress={() => Alert.alert('Restore the previous cloud copy?', 'The current cloud version will be saved as the recovery copy.', [{ text: 'Cancel', style: 'cancel' }, { text: 'Restore previous', style: 'destructive', onPress: () => { void undoCloudReplacement(); } }])}><Text style={styles.actionIcon}>↶</Text><View style={{ flex: 1 }}><Text style={styles.actionTitle}>Undo last cloud replacement</Text><Text style={styles.copy}>Restore the cloud version saved before replacing it</Text></View><Text style={styles.arrow}>›</Text></Pressable>}
-            <Pressable accessibilityRole="button" style={styles.action} disabled={busy} onPress={switchCloudAccount}><Text style={styles.actionIcon}>⇄</Text><View style={{ flex: 1 }}><Text style={styles.actionTitle}>Switch account</Text><Text style={styles.copy}>Link this device to a different cloud account</Text></View><Text style={styles.arrow}>›</Text></Pressable>
+            <Pressable accessibilityRole="button" style={styles.action} disabled={busy || accountSummary.accountMismatch} onPress={() => Alert.alert('Restore cloud copy?', 'The cloud copy will replace the study data on this device. A recovery copy will be saved first.', [{ text: 'Cancel', style: 'cancel' }, { text: 'Restore cloud', style: 'destructive', onPress: () => { void syncCloud('pull'); } }])}><View style={styles.iconSlot}><StudyIcon name="download" size={20} /></View><View style={{ flex: 1 }}><Text style={styles.actionTitle}>Restore cloud copy</Text><Text style={styles.copy}>Replace local data after creating a recovery copy</Text></View><StudyIcon name="chevron" size={13} color={appColor('#9AADB8', 'text')} /></Pressable>
+            <Pressable accessibilityRole="button" style={styles.action} disabled={busy || accountSummary.accountMismatch} onPress={() => Alert.alert('Replace cloud copy?', 'This replaces the existing cloud backup with the data on this device. Continue only if this is the copy you want to keep.', [{ text: 'Cancel', style: 'cancel' }, { text: 'Replace cloud', style: 'destructive', onPress: () => { void syncCloud('push'); } }])}><View style={styles.iconSlot}><StudyIcon name="upload" size={20} /></View><View style={{ flex: 1 }}><Text style={styles.actionTitle}>Replace cloud with this device</Text><Text style={styles.copy}>Use this device as the copy to keep</Text></View><StudyIcon name="chevron" size={13} color={appColor('#9AADB8', 'text')} /></Pressable>
+            {accountSummary.hasCloudRecovery && !accountSummary.accountMismatch && <Pressable accessibilityRole="button" style={styles.action} disabled={busy} onPress={() => Alert.alert('Restore the previous cloud copy?', 'The current cloud version will be saved as the recovery copy.', [{ text: 'Cancel', style: 'cancel' }, { text: 'Restore previous', style: 'destructive', onPress: () => { void undoCloudReplacement(); } }])}><View style={styles.iconSlot}><StudyIcon name="undo" size={20} /></View><View style={{ flex: 1 }}><Text style={styles.actionTitle}>Undo last cloud replacement</Text><Text style={styles.copy}>Restore the cloud version saved before replacing it</Text></View><StudyIcon name="chevron" size={13} color={appColor('#9AADB8', 'text')} /></Pressable>}
+            <Pressable accessibilityRole="button" style={styles.action} disabled={busy} onPress={switchCloudAccount}><View style={styles.iconSlot}><StudyIcon name="swap" size={20} /></View><View style={{ flex: 1 }}><Text style={styles.actionTitle}>Switch account</Text><Text style={styles.copy}>Link this device to a different cloud account</Text></View><StudyIcon name="chevron" size={13} color={appColor('#9AADB8', 'text')} /></Pressable>
           </>}
-        </> : <View style={styles.info}><Text style={styles.infoIcon}>☁️</Text><View style={{ flex: 1 }}><Text style={styles.infoTitle}>No account signed in</Text><Text style={styles.copy}>Sign in from the welcome screen to sync your study data.</Text></View></View>}
+        </> : <View style={styles.info}><View style={styles.iconSlot}><StudyIcon name="cloud" size={22} /></View><View style={{ flex: 1 }}><Text style={styles.infoTitle}>No account signed in</Text><Text style={styles.copy}>Sign in from the welcome screen to sync your study data.</Text></View></View>}
       </View>
 
       <View style={styles.groupCard}>
         <Text style={styles.groupTitle}>Account security</Text>
-        <Text style={styles.groupDescription}>Manage access to your MedExam account. Changing your email may require confirming the new address.</Text>
-        <Pressable accessibilityRole="button" style={styles.action} disabled={busy || !session} onPress={() => { setEmailDraft(String(session?.user.email ?? '')); setEmailVisible(true); }}><Text style={styles.actionIcon}>✉</Text><View style={{ flex: 1 }}><Text style={styles.actionTitle}>Change email address</Text><Text style={styles.copy}>{session?.user.email ?? 'No signed-in email'}</Text></View><Text style={styles.arrow}>›</Text></Pressable>
-        <Pressable accessibilityRole="button" style={styles.action} disabled={busy || !session} onPress={() => setChangePasswordVisible(true)}><Text style={styles.actionIcon}>•••</Text><View style={{ flex: 1 }}><Text style={styles.actionTitle}>Change password</Text><Text style={styles.copy}>Update the password used to sign in</Text></View><Text style={styles.arrow}>›</Text></Pressable>
+        <Text style={styles.groupDescription}>Manage access to your Medora account. Changing your email may require confirming the new address.</Text>
+        <Pressable accessibilityRole="button" style={styles.action} disabled={busy || !session} onPress={() => { setEmailDraft(String(session?.user.email ?? '')); setEmailVisible(true); }}><View style={styles.iconSlot}><StudyIcon name="mail" size={20} /></View><View style={{ flex: 1 }}><Text style={styles.actionTitle}>Change email address</Text><Text style={styles.copy}>{session?.user.email ?? 'No signed-in email'}</Text></View><StudyIcon name="chevron" size={13} color={appColor('#9AADB8', 'text')} /></Pressable>
+        <Pressable accessibilityRole="button" style={styles.action} disabled={busy || !session} onPress={() => setChangePasswordVisible(true)}><View style={styles.iconSlot}><StudyIcon name="key" size={20} /></View><View style={{ flex: 1 }}><Text style={styles.actionTitle}>Change password</Text><Text style={styles.copy}>Update the password used to sign in</Text></View><StudyIcon name="chevron" size={13} color={appColor('#9AADB8', 'text')} /></Pressable>
       </View>
       {busy && <ActivityIndicator color={appColor('#327E9D', 'text')} style={{ marginTop: 16 }} />}
     </PullToRefreshScrollView>
@@ -307,8 +309,8 @@ export default function SettingsScreen() {
         >
         <View style={styles.modal}>
         <Text style={styles.modalTitle}>Restore a backup</Text>
-        <Text style={styles.copy}>Select a MedExam JSON backup. We will check it and show a preview before replacing anything.</Text>
-        {!manualRestoreVisible && <Pressable accessibilityRole="button" onPress={() => { void pickBackupFile(); }} style={[styles.action, { marginTop: 14 }]}><Text style={styles.actionIcon}>＋</Text><View style={{ flex: 1 }}><Text style={styles.actionTitle}>{backupFileName || 'Choose backup file'}</Text><Text style={styles.copy}>Select a .json file from Files</Text></View><Text style={styles.arrow}>›</Text></Pressable>}
+        <Text style={styles.copy}>Select a Medora JSON backup. We will check it and show a preview before replacing anything.</Text>
+        {!manualRestoreVisible && <Pressable accessibilityRole="button" onPress={() => { void pickBackupFile(); }} style={[styles.action, { marginTop: 14 }]}><View style={styles.iconSlot}><StudyIcon name="plus" size={20} /></View><View style={{ flex: 1 }}><Text style={styles.actionTitle}>{backupFileName || 'Choose backup file'}</Text><Text style={styles.copy}>Select a .json file from Files</Text></View><StudyIcon name="chevron" size={13} color={appColor('#9AADB8', 'text')} /></Pressable>}
         {backupSummary && <View style={styles.backupPreview}><Text style={styles.backupInfoTitle}>Backup preview</Text>{backupFileName ? <Text style={styles.copy}>File: {backupFileName}</Text> : null}<Text style={styles.copy}>{backupSummary.subjectCount} subjects · {backupSummary.topicCount} topics · {backupSummary.flashcardCount} flashcards</Text><Text style={styles.copy}>{backupSummary.studySessionCount} study sessions · {backupSummary.quizResultCount} quiz results</Text>{backupSummary.exportedAt && !Number.isNaN(Date.parse(backupSummary.exportedAt)) ? <Text style={styles.copy}>Created {new Date(backupSummary.exportedAt).toLocaleString()}</Text> : null}<Text style={styles.copy}>Your current study data is saved as a recovery copy before this restore.</Text></View>}
         {manualRestoreVisible && <TextInput value={backupText} onChangeText={handleBackupTextChange} multiline textAlignVertical="top" autoCapitalize="none" autoCorrect={false} style={styles.input} placeholder="Paste backup JSON here" />}
         <Pressable accessibilityRole="button" onPress={() => { setManualRestoreVisible((value) => !value); setBackupText(''); setBackupSummary(null); setBackupFileName(''); }} style={styles.manualPaste}><Text style={styles.linkText}>{manualRestoreVisible ? 'Choose a file instead' : 'Paste backup JSON instead'}</Text></Pressable>
@@ -324,7 +326,7 @@ export default function SettingsScreen() {
           <ScrollView contentContainerStyle={styles.passwordModalScroll} keyboardShouldPersistTaps="handled" keyboardDismissMode={Platform.OS === 'ios' ? 'interactive' : 'on-drag'} automaticallyAdjustKeyboardInsets={Platform.OS === 'ios'}>
             <View style={styles.modal}>
               <Text style={styles.modalTitle}>Change email address</Text>
-              <Text style={styles.copy}>This email is used to sign in and receive account messages. Supabase may ask you to confirm the new address before it takes effect.</Text>
+              <Text style={styles.copy}>This email is used to sign in and receive account messages. You may be asked to confirm the new address before it takes effect.</Text>
               <View style={styles.passwordField}><Text style={styles.accountLabel}>New email</Text><TextInput value={emailDraft} onChangeText={setEmailDraft} style={styles.passwordInput} keyboardType="email-address" autoCapitalize="none" autoCorrect={false} autoComplete="email" textContentType="emailAddress" returnKeyType="done" /></View>
               <View style={styles.buttons}><Pressable onPress={() => setEmailVisible(false)} style={styles.cancel}><Text style={styles.cancelText}>Cancel</Text></Pressable><Pressable disabled={busy} onPress={() => { void saveAccountEmail(); }} style={[styles.restore, busy && styles.disabled]}><Text style={styles.restoreText}>{busy ? 'Saving…' : 'Update email'}</Text></Pressable></View>
             </View>
@@ -381,6 +383,7 @@ const styles = StyleSheet.create({
   sectionTitle: { color: appColor('#17324D', 'text'), fontSize: 19, fontWeight: '800', marginTop: 18, marginBottom: 11 },
   eyebrow: { color: appColor('#448EA8', 'text'), fontSize: 11, fontWeight: '800', letterSpacing: 1.5, marginTop: 8 }, title: { color: appColor('#17324D', 'text'), fontSize: 34, fontWeight: '800', marginTop: 8 },
   subtitle: { color: appColor('#718493', 'text'), fontSize: 15, lineHeight: 22, marginTop: 7, marginBottom: 22 }, info: { flexDirection: 'row', backgroundColor: appColor('#E7F4F8', 'background'), borderRadius: 18, padding: 16, marginBottom: 18 }, infoIcon: { fontSize: 22, marginRight: 12 }, infoTitle: { color: appColor('#17324D', 'text'), fontSize: 15, fontWeight: '700' }, copy: { color: appColor('#718493', 'text'), fontSize: 13, lineHeight: 19, marginTop: 5 },
+  iconSlot: { width: 38 },
   action: { flexDirection: 'row', alignItems: 'center', backgroundColor: appColor('#FFFFFF', 'background'), borderRadius: 16, padding: 16, marginBottom: 10, borderWidth: 1, borderColor: appColor('#EDF3F6', 'border') }, actionIcon: { width: 38, color: appColor('#327E9D', 'text'), fontSize: 23, fontWeight: '700' }, actionTitle: { color: appColor('#17324D', 'text'), fontSize: 15, fontWeight: '700' }, arrow: { fontSize: 27, color: appColor('#83A3B1', 'text'), marginLeft: 8 },
   backupInfo: { backgroundColor: appColor('#F2F8FA', 'background'), borderRadius: 14, padding: 13, marginBottom: 12 }, backupInfoTitle: { color: appColor('#315267', 'text'), fontSize: 13, fontWeight: '800' }, backupPreview: { backgroundColor: appColor('#E7F4F8', 'background'), borderRadius: 14, padding: 14, marginTop: 14 },
   reminderCard: { flexDirection: 'row', alignItems: 'center', backgroundColor: appColor('#F7FAFC', 'background'), borderRadius: 14, padding: 12, marginTop: 8, marginBottom: 10 }, reminderTimeCard: { backgroundColor: appColor('#F7FAFC', 'background'), borderRadius: 14, padding: 12, marginBottom: 4 }, reminderPresets: { flexDirection: 'row', gap: 8, marginTop: 7, marginBottom: 10 }, timePreset: { flex: 1, minHeight: 38, borderRadius: 10, alignItems: 'center', justifyContent: 'center', backgroundColor: appColor('#FFFFFF', 'background'), borderWidth: 1, borderColor: appColor('#E4EDF1', 'border') }, timePresetSelected: { backgroundColor: appColor('#E1F3F7', 'background'), borderColor: appColor('#7CC1D0', 'border') }, timePresetText: { color: appColor('#577082', 'text'), fontWeight: '700', fontSize: 12 }, timePresetTextSelected: { color: appColor('#0F7181', 'text') }, reminderTimeRow: { flexDirection: 'row', alignItems: 'flex-end', gap: 8 }, reminderSave: { padding: 10 },

@@ -10,7 +10,7 @@ import { useEffect } from 'react';
 import { ActivityIndicator, StyleSheet, View, useColorScheme } from 'react-native';
 
 import { AnimatedSplashOverlay } from '@/components/animated-icon';
-import { MedExamLogoMark } from '@/components/medexam-logo';
+import { MedoraLogoMark } from '@/components/medora-logo';
 import { AuthProvider, useAuth } from '@/services/auth-context';
 import { initializeCloudSync } from '@/services/cloud-sync';
 import { AppSettingsProvider, useAppSettings } from '@/services/app-settings-context';
@@ -21,7 +21,7 @@ function AppNavigator() {
   const { session, loading } = useAuth();
 
   if (loading) {
-    return <View style={styles.loading}><MedExamLogoMark size={74} /><ActivityIndicator color={appColor('#0F7181', 'text')} style={styles.spinner} /></View>;
+    return <View style={styles.loading}><MedoraLogoMark size={74} /><ActivityIndicator color={appColor('#0F7181', 'text')} style={styles.spinner} /></View>;
   }
 
   return (
@@ -35,6 +35,7 @@ function AppNavigator() {
         <Stack.Screen name="explore" options={{ headerShown: false }} />
         <Stack.Screen name="focus" options={{ headerShown: false }} />
         <Stack.Screen name="settings" options={{ headerShown: false }} />
+        <Stack.Screen name="account" options={{ headerShown: false, presentation: 'modal' }} />
         <Stack.Screen name="subject/[id]" options={{ headerShown: false }} />
         <Stack.Screen name="subject/exam" options={{ headerShown: false }} />
         <Stack.Screen name="subject/study-plan" options={{ headerShown: false }} />
@@ -69,7 +70,7 @@ function AppThemeShell() {
     {ready ? <AuthProvider>
       <AnimatedSplashOverlay />
       <AppNavigator />
-    </AuthProvider> : <View style={styles.loading}><MedExamLogoMark size={74} /><ActivityIndicator color={appColor('#0F7181', 'text')} style={styles.spinner} /></View>}
+    </AuthProvider> : <View style={styles.loading}><MedoraLogoMark size={74} /><ActivityIndicator color={appColor('#0F7181', 'text')} style={styles.spinner} /></View>}
   </ThemeProvider>;
 }
 

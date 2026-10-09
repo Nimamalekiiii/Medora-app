@@ -1,1293 +1,343 @@
-import { LocalizedText as Text } from '@/components/localized-text';
+import { cardShadow } from '@/components/gloss';
+import { IconChip } from '@/components/study/icon-chip';
+import { ProgressBar } from '@/components/charts';
+import { ink, p, useProgressPalette } from '@/components/progress/theme';
+import { StudyIcon } from '@/components/study-icon';
 import { appColor } from '@/constants/adaptive-color';
+import { ui } from '@/constants/ui';
+import { useAppSettings } from '@/services/app-settings-context';
+import { buildCardQueue, type CardOrder } from '@/services/flashcard-session';
+import { formatReviewInterval } from '@/services/localization';
+import { previewReviewIntervals, scheduleReview, type ReviewRating } from '@/services/spaced-repetition';
+import { addFlashcardReview, addStudyActivity, getFlashcards, getTopicsForSubject, updateFlashcard } from '@/services/storage';
+import type { Flashcard, StudyActivity } from '@/types/study';
 import { Stack, router, useLocalSearchParams } from 'expo-router';
-import { useEffect, useRef, useState } from 'react';
-import {
-  ActivityIndicator,
-  Pressable,
-  StyleSheet,
-  View,
-} from 'react-native';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { ActivityIndicator, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import PullToRefreshScrollView from '../../../../components/pull-to-refresh-scroll-view';
 
-import type {
-  Flashcard,
-  FlashcardReview,
-  StudyActivity,
-} from '../../../../types/study';
+const param = (value: string | string[] | undefined) => (Array.isArray(value) ? value[0] ?? '' : value ?? '');
+const RATINGS: ReviewRating[] = ['again', 'hard', 'good', 'easy'];
+const RATING_COLOR: Record<ReviewRating, string> = { again: '#D03B3B', hard: '#C98500', good: '#2A78D6', easy: '#0CA30C' };
 
-import {
-  addFlashcardReview,
-  addStudyActivity,
-  getFlashcards,
-  updateFlashcard,
-} from '../../../../services/storage';
+type Counts = Record<ReviewRating, number>;
+type TopicTotals = { topicName: string; counts: Counts };
+const noCounts = (): Counts => ({ again: 0, hard: 0, good: 0, easy: 0 });
 
-import {
-  calculateNextReviewDate,
-  getDueFlashcards,
-} from '../../../../services/study-engine';
-
-type ReviewRating =
-  FlashcardReview['rating'];
-
+/**
+ * The flashcard session. Each card is shown, turned over and rated; the
+ * rating decides when the card comes back. Opened either for the cards that
+ * are due (one topic or all topics) or as extra practice on one topic.
+ */
 export default function ReviewScreen() {
-  const { id, name, all } = useLocalSearchParams();
+  const params = useLocalSearchParams<{
+    id?: string | string[]; name?: string | string[]; subjectId?: string | string[]; all?: string | string[];
+    mode?: string | string[]; count?: string | string[]; order?: string | string[]; answerFirst?: string | string[];
+    /** A subject id: review the due cards from every topic in that subject. */
+    subject?: string | string[];
+  }>();
+  const topicId = param(params.id);
+  const subjectFilter = param(params.subject);
+  const allTopics = param(params.all) === '1' || subjectFilter !== '';
+  const practice = param(params.mode) === 'practice' && !allTopics;
+  const order = (['smart', 'ordered', 'shuffled'].includes(param(params.order)) ? param(params.order) : 'smart') as CardOrder;
+  const count = Number(param(params.count)) || 0;
+  const answerFirst = param(params.answerFirst) === '1';
 
-  const topicId = String(id ?? '');
-  const allTopics = all === '1';
-  const topicName = String(
-    name ?? (allTopics ? 'Due flashcards' : 'Unknown topic')
-  );
+  const { preferences } = useAppSettings();
+  const language = preferences.language;
+  const L = (en: string, no: string) => (language === 'no' ? no : en);
+  const palette = useProgressPalette();
+  const title = subjectFilter ? param(params.name) || L('Due flashcards', 'Flashcards som har forfalt') : allTopics ? L('Due flashcards', 'Flashcards som har forfalt') : param(params.name) || 'Flashcards';
 
-  const [flashcards, setFlashcards] =
-    useState<Flashcard[]>([]);
+  const [queue, setQueue] = useState<Flashcard[] | null>(null);
+  const [index, setIndex] = useState(0);
+  const [revealed, setRevealed] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [finished, setFinished] = useState(false);
+  const [totals, setTotals] = useState<Counts>(noCounts);
+  const [remainingDue, setRemainingDue] = useState(0);
+  const [failed, setFailed] = useState(false);
 
-  const [currentIndex, setCurrentIndex] =
-    useState(0);
+  const startedAt = useRef(Date.now());
+  const byTopic = useRef(new Map<string, TopicTotals>());
+  const summarySaved = useRef(false);
 
-  const [showAnswer, setShowAnswer] =
-    useState(false);
+  /** All flashcards, or only those in the chosen subject's topics. */
+  const loadCards = useCallback(async () => {
+    const cards = await getFlashcards();
+    if (!subjectFilter) return cards;
+    const topicIds = new Set((await getTopicsForSubject(subjectFilter)).map((topic) => String(topic.id)));
+    return cards.filter((card) => topicIds.has(String(card.topicId)));
+  }, [subjectFilter]);
 
-  const [loading, setLoading] =
-    useState(true);
+  const load = useCallback(async () => {
+    try {
+      const cards = await loadCards();
+      setQueue(buildCardQueue(cards, { topicId: allTopics ? undefined : topicId, mode: practice ? 'practice' : 'due', order, count }));
+      setIndex(0);
+      setRevealed(false);
+      setFinished(false);
+      setTotals(noCounts());
+      setFailed(false);
+      byTopic.current = new Map();
+      summarySaved.current = false;
+      startedAt.current = Date.now();
+    } catch (error) {
+      console.warn('Could not load flashcards for the session:', error);
+      setFailed(true);
+      setQueue([]);
+    }
+  }, [allTopics, topicId, practice, order, count, loadCards]);
 
-  const [sessionStartedAt] =
-    useState(Date.now());
+  useEffect(() => { void load(); }, [load]);
 
-  const [sessionFinished, setSessionFinished] =
-    useState(false);
-
-  const [reviewedCount, setReviewedCount] =
-    useState(0);
-
-  const [againCount, setAgainCount] =
-    useState(0);
-
-  const [hardCount, setHardCount] =
-    useState(0);
-
-  const [goodCount, setGoodCount] =
-    useState(0);
-
-  const [easyCount, setEasyCount] =
-    useState(0);
-
-  const [saving, setSaving] =
-    useState(false);
-  const ratingTotals = useRef(new Map<string, { topicName: string; count: number; again: number; hard: number; good: number; easy: number }>());
-
-  useEffect(() => {
-    loadDueFlashcards();
-  }, [topicId, allTopics]);
-
-  const loadDueFlashcards =
-    async () => {
+  /** Records the session once, as one study activity per topic that had cards rated. */
+  const saveSummary = useCallback(async () => {
+    if (summarySaved.current || byTopic.current.size === 0) return;
+    summarySaved.current = true;
+    const durationSeconds = Math.max(1, Math.round((Date.now() - startedAt.current) / 1000));
+    const completedAt = new Date().toISOString();
+    let position = 0;
+    for (const [id, entry] of byTopic.current.entries()) {
+      const { again, hard, good, easy } = entry.counts;
+      const activity: StudyActivity = {
+        id: Date.now() + position,
+        topicId: id,
+        topicName: entry.topicName,
+        activity: 'review',
+        completedAt,
+        // The time belongs to the whole session, so it is counted on one topic only.
+        durationSeconds: position === 0 ? durationSeconds : 0,
+        questionCount: again + hard + good + easy,
+        againCount: again,
+        hardCount: hard,
+        goodCount: good,
+        easyCount: easy,
+      };
+      position += 1;
       try {
-        setLoading(true);
-
-        const allFlashcards =
-          await getFlashcards();
-
-        const dueCards =
-          getDueFlashcards(
-            allFlashcards,
-            allTopics ? undefined : topicId
-          );
-
-        setFlashcards(dueCards);
-        setCurrentIndex(0);
-        setShowAnswer(false);
-      } catch (error) {
-        console.error(
-          'Failed to load review flashcards:',
-          error
-        );
-      } finally {
-        setLoading(false);
-      }
-    };
-
-  const refreshDueFlashcards = async () => {
-    try {
-      const currentCardId = flashcards[currentIndex]?.id;
-      const allFlashcards = await getFlashcards();
-      const dueCards = getDueFlashcards(allFlashcards, allTopics ? undefined : topicId);
-      setFlashcards(dueCards);
-      const currentCardIndex = dueCards.findIndex((card) => String(card.id) === String(currentCardId));
-      if (currentCardIndex >= 0) setCurrentIndex(currentCardIndex);
-      else if (currentIndex >= dueCards.length) {
-        setCurrentIndex(Math.max(0, dueCards.length - 1));
-        setShowAnswer(false);
-      }
-    } catch (error) {
-      console.warn('Could not refresh review cards:', error);
-    }
-  };
-
-  const saveReviewActivity =
-    async () => {
-      const durationSeconds =
-        Math.max(
-          1,
-          Math.round(
-            (Date.now() -
-              sessionStartedAt) /
-              1000
-          )
-        );
-
-      const groups = [...ratingTotals.current.entries()];
-      for (const [index, [groupTopicId, counts]] of groups.entries()) {
-        const activity: StudyActivity = {
-          id: Date.now() + index,
-          topicId: groupTopicId,
-          topicName: counts.topicName,
-          activity: 'review',
-          completedAt: new Date().toISOString(),
-          durationSeconds: index === 0 ? durationSeconds : 0,
-          questionCount: counts.count,
-          againCount: counts.again,
-          hardCount: counts.hard,
-          goodCount: counts.good,
-          easyCount: counts.easy,
-        };
         await addStudyActivity(activity);
+      } catch (error) {
+        console.warn('Could not save the flashcard session summary:', error);
       }
-    };
-
-  const handleRating = async (
-    rating: ReviewRating
-  ) => {
-    if (saving) {
-      return;
     }
+  }, []);
 
-    const currentFlashcard =
-      flashcards[currentIndex];
+  // Leaving part-way still records the cards that were rated.
+  useEffect(() => () => { void saveSummary(); }, [saveSummary]);
 
-    if (!currentFlashcard) {
-      return;
-    }
+  const card = queue?.[index];
 
+  async function rate(rating: ReviewRating) {
+    if (!card || saving) return;
+    setSaving(true);
     try {
-      setSaving(true);
+      const reviewedAt = new Date();
+      const schedule = scheduleReview(card, rating, reviewedAt);
+      await addFlashcardReview({ id: `${card.id}-${reviewedAt.getTime()}`, flashcardId: card.id, topicId: String(card.topicId), reviewedAt: reviewedAt.toISOString(), rating });
+      await updateFlashcard(card.id, {
+        ...schedule,
+        lastReviewedAt: reviewedAt.toISOString(),
+        difficulty: rating === 'easy' ? 'easy' : rating === 'good' ? 'medium' : 'hard',
+      });
 
-      const reviewedAt =
-        new Date();
+      const key = String(card.topicId);
+      const entry = byTopic.current.get(key) ?? { topicName: card.topicName || title, counts: noCounts() };
+      entry.counts[rating] += 1;
+      byTopic.current.set(key, entry);
+      setTotals((current) => ({ ...current, [rating]: current[rating] + 1 }));
 
-      const nextReviewAt =
-        calculateNextReviewDate(
-          rating,
-          reviewedAt
-        );
-
-      const updatedDifficulty =
-        rating === 'again'
-          ? 'hard'
-          : rating === 'hard'
-          ? 'hard'
-          : rating === 'good'
-          ? 'medium'
-          : 'easy';
-
-      const review: FlashcardReview = {
-        id: `${currentFlashcard.id}-${Date.now()}`,
-        flashcardId:
-          currentFlashcard.id,
-        topicId: String(currentFlashcard.topicId),
-        reviewedAt:
-          reviewedAt.toISOString(),
-        rating,
-      };
-
-      await addFlashcardReview(
-        review
-      );
-
-      await updateFlashcard(
-        currentFlashcard.id,
-        {
-          lastReviewedAt:
-            reviewedAt.toISOString(),
-          nextReviewAt,
-          difficulty:
-            updatedDifficulty,
-        }
-      );
-
-      const cardTopicId = String(currentFlashcard.topicId);
-      const cardTopicName = currentFlashcard.topicName || topicName;
-      const topicCounts = ratingTotals.current.get(cardTopicId) ?? {
-        topicName: cardTopicName, count: 0, again: 0, hard: 0, good: 0, easy: 0,
-      };
-      topicCounts.count += 1;
-      topicCounts[rating] += 1;
-      ratingTotals.current.set(cardTopicId, topicCounts);
-
-      setReviewedCount(
-        (previous) =>
-          previous + 1
-      );
-
-      if (rating === 'again') {
-        setAgainCount(
-          (previous) =>
-            previous + 1
-        );
+      if (queue && index >= queue.length - 1) {
+        await saveSummary();
+        const cards = await loadCards();
+        setRemainingDue(buildCardQueue(cards, { topicId: allTopics ? undefined : topicId, mode: 'due' }).length);
+        setFinished(true);
+      } else {
+        setIndex((current) => current + 1);
+        setRevealed(false);
       }
-
-      if (rating === 'hard') {
-        setHardCount(
-          (previous) =>
-            previous + 1
-        );
-      }
-
-      if (rating === 'good') {
-        setGoodCount(
-          (previous) =>
-            previous + 1
-        );
-      }
-
-      if (rating === 'easy') {
-        setEasyCount(
-          (previous) =>
-            previous + 1
-        );
-      }
-
-      const isLastCard =
-        currentIndex ===
-        flashcards.length - 1;
-
-      if (isLastCard) {
-        await saveReviewActivity();
-        setSessionFinished(true);
-        return;
-      }
-
-      setCurrentIndex(
-        (previous) =>
-          previous + 1
-      );
-
-      setShowAnswer(false);
     } catch (error) {
-      console.error(
-        'Failed to save flashcard review:',
-        error
-      );
+      console.warn('Could not save the flashcard rating:', error);
+      setFailed(true);
     } finally {
       setSaving(false);
     }
-  };
+  }
 
-  const handleReviewAgain =
-    async () => {
-      setSessionFinished(false);
-      setReviewedCount(0);
-      setAgainCount(0);
-      setHardCount(0);
-      setGoodCount(0);
-      setEasyCount(0);
-      ratingTotals.current.clear();
+  const ratingLabel: Record<ReviewRating, string> = { again: L('Again', 'Igjen'), hard: L('Hard', 'Vanskelig'), good: L('Good', 'Bra'), easy: L('Easy', 'Lett') };
+  const reviewed = totals.again + totals.hard + totals.good + totals.easy;
 
-      await loadDueFlashcards();
-    };
+  const bar = (
+    <View style={styles.bar}>
+      <Pressable accessibilityRole="button" accessibilityLabel={L('Close', 'Lukk')} onPress={() => router.back()} style={({ pressed }) => [styles.barButton, pressed && p.pressed]} hitSlop={8}>
+        <StudyIcon name="x" size={18} color={ink.secondary} />
+      </Pressable>
+      <Text style={styles.barTitle} numberOfLines={1}>{title}</Text>
+      <View style={styles.barButton} />
+    </View>
+  );
 
-  if (loading) {
-    return (
-      <SafeAreaView
-        style={styles.container}
-      >
-        <Stack.Screen
-          options={{
-            headerShown: false,
-          }}
-        />
-
-        <View
-          style={styles.loadingContainer}
-        >
-          <ActivityIndicator
-            size="large"
-          />
-
-          <Text
-            style={styles.loadingText}
-          >
-            Loading review cards...
-          </Text>
+  let body;
+  if (queue === null) {
+    body = <View style={styles.state}><ActivityIndicator color={palette.accent} /></View>;
+  } else if (finished) {
+    body = (
+      <ScrollView contentContainerStyle={styles.scroll} showsVerticalScrollIndicator={false}>
+        <View style={[p.card, styles.doneCard]}>
+          <View style={[styles.doneIcon, { backgroundColor: palette.accent }]}><StudyIcon name="check" size={26} color="#FFFFFF" /></View>
+          <Text style={styles.doneTitle}>{L('Session complete', 'Økten er fullført')}</Text>
+          <Text style={[p.body, styles.centered]}>{reviewed} {reviewed === 1 ? L('card reviewed', 'kort repetert') : L('cards reviewed', 'kort repetert')}</Text>
+          <View style={styles.summary}>
+            {RATINGS.map((rating) => (
+              <View key={rating} style={styles.summaryItem}>
+                <View style={styles.summaryTop}><View style={[p.legendDot, { backgroundColor: RATING_COLOR[rating] }]} /><Text style={styles.summaryValue}>{totals[rating]}</Text></View>
+                <Text style={p.small}>{ratingLabel[rating]}</Text>
+              </View>
+            ))}
+          </View>
+          <Text style={[p.small, styles.centered]}>{L('Each card comes back when it is due, based on how you rated it.', 'Hvert kort kommer tilbake når det forfaller, ut fra hvordan du vurderte det.')}</Text>
         </View>
-      </SafeAreaView>
+        {remainingDue > 0 ? (
+          <Pressable accessibilityRole="button" onPress={() => { void load(); }} style={({ pressed }) => [p.button, styles.wide, { backgroundColor: palette.accent }, pressed && p.pressed]}>
+            <Text style={p.buttonText}>{practice ? L('Practise again', 'Øv en gang til') : L(`Review ${remainingDue} more`, `Repeter ${remainingDue} til`)}</Text>
+          </Pressable>
+        ) : practice ? (
+          <Pressable accessibilityRole="button" onPress={() => { void load(); }} style={({ pressed }) => [p.button, styles.wide, { backgroundColor: palette.accent }, pressed && p.pressed]}>
+            <Text style={p.buttonText}>{L('Practise again', 'Øv en gang til')}</Text>
+          </Pressable>
+        ) : null}
+        <Pressable accessibilityRole="button" onPress={() => router.back()} style={({ pressed }) => [p.outlineButton, styles.wide, pressed && p.pressed]}>
+          <Text style={p.outlineButtonText}>{L('Done', 'Ferdig')}</Text>
+        </Pressable>
+      </ScrollView>
+    );
+  } else if (!card) {
+    body = (
+      <View style={styles.state}>
+        <IconChip name={failed ? 'review' : 'check'} />
+        <Text style={p.emptyTitle}>{failed ? L('The cards could not be loaded', 'Kortene kunne ikke lastes inn') : practice ? L('No flashcards in this topic yet', 'Ingen flashcards i dette temaet ennå') : L('Nothing is due right now', 'Ingenting har forfalt akkurat nå')}</Text>
+        <Text style={[p.body, styles.centered]}>{failed ? L('Go back and try again.', 'Gå tilbake og prøv igjen.') : practice ? L('Create or generate cards first.', 'Lag eller generer kort først.') : L('Cards come back here when it is time to review them.', 'Kortene kommer tilbake hit når det er tid for å repetere dem.')}</Text>
+        <Pressable accessibilityRole="button" onPress={() => router.back()} style={({ pressed }) => [p.button, { backgroundColor: palette.accent }, pressed && p.pressed]}>
+          <Text style={p.buttonText}>{L('Go back', 'Gå tilbake')}</Text>
+        </Pressable>
+      </View>
+    );
+  } else {
+    const total = queue.length;
+    const intervals = previewReviewIntervals(card);
+    const question = answerFirst ? card.back : card.front;
+    const answer = answerFirst ? card.front : card.back;
+    body = (
+      <>
+        <View style={styles.progress}>
+          <View style={styles.progressTop}>
+            <Text style={p.small}>{L('Card', 'Kort')} {index + 1} {L('of', 'av')} {total}</Text>
+            {allTopics && card.topicName ? <Text style={p.chip} numberOfLines={1}>{card.topicName}</Text> : null}
+          </View>
+          <ProgressBar value={(index / total) * 100} color={palette.accent} trackColor={palette.track} height={6} />
+        </View>
+
+        <ScrollView contentContainerStyle={styles.scroll} showsVerticalScrollIndicator={false}>
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel={revealed ? L('Card with the answer shown', 'Kort med svaret vist') : L('Show answer', 'Vis svar')}
+            onPress={() => setRevealed(true)}
+            disabled={revealed}
+            style={[p.card, styles.card]}
+          >
+            <Text style={styles.side}>{answerFirst ? L('Answer', 'Svar') : L('Question', 'Spørsmål')}</Text>
+            <Text style={styles.question}>{question}</Text>
+            {revealed ? (
+              <>
+                <View style={styles.divider} />
+                <Text style={styles.side}>{answerFirst ? L('Question', 'Spørsmål') : L('Answer', 'Svar')}</Text>
+                <Text style={styles.answer}>{answer}</Text>
+              </>
+            ) : (
+              <Text style={[p.small, styles.hint]}>{L('Think of the answer, then tap to check.', 'Tenk ut svaret, og trykk for å sjekke.')}</Text>
+            )}
+          </Pressable>
+        </ScrollView>
+
+        <View style={styles.footer}>
+          {failed ? <Text style={styles.error}>{L('The rating could not be saved. Try again.', 'Vurderingen kunne ikke lagres. Prøv igjen.')}</Text> : null}
+          {revealed ? (
+            <>
+              <Text style={[p.small, styles.centered]}>{L('How well did you remember it?', 'Hvor godt husket du det?')}</Text>
+              <View style={styles.ratings}>
+                {RATINGS.map((rating) => (
+                  <Pressable
+                    key={rating}
+                    accessibilityRole="button"
+                    accessibilityLabel={`${ratingLabel[rating]}, ${formatReviewInterval(intervals[rating], language)}`}
+                    disabled={saving}
+                    onPress={() => { void rate(rating); }}
+                    style={({ pressed }) => [styles.rating, (pressed || saving) && p.pressed]}
+                  >
+                    <View style={[styles.ratingMark, { backgroundColor: RATING_COLOR[rating] }]} />
+                    <Text style={styles.ratingLabel}>{ratingLabel[rating]}</Text>
+                    <Text style={styles.ratingWhen} numberOfLines={1}>{formatReviewInterval(intervals[rating], language)}</Text>
+                  </Pressable>
+                ))}
+              </View>
+            </>
+          ) : (
+            <Pressable accessibilityRole="button" onPress={() => setRevealed(true)} style={({ pressed }) => [p.button, styles.show, { backgroundColor: palette.accent }, pressed && p.pressed]}>
+              <Text style={styles.showText}>{L('Show answer', 'Vis svar')}</Text>
+            </Pressable>
+          )}
+        </View>
+      </>
     );
   }
-
-  if (sessionFinished) {
-    return (
-      <SafeAreaView
-        style={styles.container}
-      >
-        <Stack.Screen
-          options={{
-            headerShown: false,
-          }}
-        />
-
-        <PullToRefreshScrollView onRefresh={refreshDueFlashcards}
-          contentContainerStyle={
-            styles.scrollContent
-          }
-          showsVerticalScrollIndicator={
-            false
-          }
-        >
-          <Pressable
-            style={styles.backButton}
-            onPress={() =>
-              router.back()
-            }
-          >
-            <Text
-              style={styles.backText}
-            >
-              ← Back
-            </Text>
-          </Pressable>
-
-          <View
-            style={
-              styles.finishedHeader
-            }
-          >
-            <Text
-              style={
-                styles.finishedTitle
-              }
-            >
-              Review complete
-            </Text>
-
-            <Text
-              style={
-                styles.finishedTopic
-              }
-            >
-              {allTopics ? 'All topics' : topicName}
-            </Text>
-
-            <Text
-              style={
-                styles.finishedSubtitle
-              }
-            >
-              Great job. Your review
-              progress has been saved.
-            </Text>
-          </View>
-
-          <View
-            style={styles.summaryCard}
-          >
-            <Text
-              style={
-                styles.summaryLabel
-              }
-            >
-              Cards reviewed
-            </Text>
-
-            <Text
-              style={
-                styles.summaryValue
-              }
-            >
-              {reviewedCount}
-            </Text>
-
-            <View
-              style={styles.ratingRow}
-            >
-              <View
-                style={styles.ratingItem}
-              >
-                <Text
-                  style={
-                    styles.ratingNumber
-                  }
-                >
-                  {againCount}
-                </Text>
-
-                <Text
-                  style={
-                    styles.ratingLabel
-                  }
-                >
-                  Again
-                </Text>
-              </View>
-
-              <View
-                style={styles.ratingItem}
-              >
-                <Text
-                  style={
-                    styles.ratingNumber
-                  }
-                >
-                  {hardCount}
-                </Text>
-
-                <Text
-                  style={
-                    styles.ratingLabel
-                  }
-                >
-                  Hard
-                </Text>
-              </View>
-
-              <View
-                style={styles.ratingItem}
-              >
-                <Text
-                  style={
-                    styles.ratingNumber
-                  }
-                >
-                  {goodCount}
-                </Text>
-
-                <Text
-                  style={
-                    styles.ratingLabel
-                  }
-                >
-                  Good
-                </Text>
-              </View>
-
-              <View
-                style={styles.ratingItem}
-              >
-                <Text
-                  style={
-                    styles.ratingNumber
-                  }
-                >
-                  {easyCount}
-                </Text>
-
-                <Text
-                  style={
-                    styles.ratingLabel
-                  }
-                >
-                  Easy
-                </Text>
-              </View>
-            </View>
-          </View>
-
-          <View
-            style={styles.savedCard}
-          >
-            <Text
-              style={styles.savedTitle}
-            >
-              ✓ Saved to your progress
-            </Text>
-
-            <Text
-              style={styles.savedText}
-            >
-              Your flashcards have been
-              scheduled for their next
-              review automatically.
-            </Text>
-          </View>
-
-          <Pressable
-            style={styles.nextButton}
-            onPress={
-              handleReviewAgain
-            }
-          >
-            <Text
-              style={
-                styles.nextButtonText
-              }
-            >
-              Check for more cards
-            </Text>
-          </Pressable>
-        </PullToRefreshScrollView>
-      </SafeAreaView>
-    );
-  }
-
-  if (flashcards.length === 0) {
-    return (
-      <SafeAreaView
-        style={styles.container}
-      >
-        <Stack.Screen
-          options={{
-            headerShown: false,
-          }}
-        />
-
-        <PullToRefreshScrollView onRefresh={refreshDueFlashcards}
-          contentContainerStyle={
-            styles.scrollContent
-          }
-          showsVerticalScrollIndicator={
-            false
-          }
-        >
-          <Pressable
-            style={styles.backButton}
-            onPress={() =>
-              router.back()
-            }
-          >
-            <Text
-              style={styles.backText}
-            >
-              ← Back
-            </Text>
-          </Pressable>
-
-          <View
-            style={styles.emptyHeader}
-          >
-            <Text
-              style={styles.emptyTitle}
-            >
-              Nothing to review
-            </Text>
-
-            <Text
-              style={styles.topicName}
-            >
-              {allTopics ? 'All topics' : topicName}
-            </Text>
-
-            <Text
-              style={styles.subtitle}
-            >
-              There are no flashcards due
-              for review right now.
-            </Text>
-          </View>
-
-          <View
-            style={styles.infoCard}
-          >
-            <Text
-              style={styles.infoTitle}
-            >
-              How Review works
-            </Text>
-
-            <Text
-              style={styles.infoText}
-            >
-              When you create and study
-              flashcards, MedExam will
-              automatically schedule them
-              for future review based on
-              how well you remember them.
-            </Text>
-          </View>
-
-          <Pressable
-            style={styles.nextButton}
-            onPress={() =>
-              router.back()
-            }
-          >
-            <Text
-              style={
-                styles.nextButtonText
-              }
-            >
-              Back to study
-            </Text>
-          </Pressable>
-        </PullToRefreshScrollView>
-      </SafeAreaView>
-    );
-  }
-
-  const currentFlashcard =
-    flashcards[currentIndex];
-
-  const progressPercent =
-    Math.round(
-      ((currentIndex + 1) /
-        flashcards.length) *
-        100
-    );
 
   return (
-    <SafeAreaView
-      style={styles.container}
-    >
-      <Stack.Screen
-        options={{
-          headerShown: false,
-        }}
-      />
-
-      <PullToRefreshScrollView onRefresh={refreshDueFlashcards}
-        contentContainerStyle={
-          styles.scrollContent
-        }
-        showsVerticalScrollIndicator={
-          false
-        }
-      >
-        <Pressable
-          style={styles.backButton}
-          onPress={() =>
-            router.back()
-          }
-        >
-          <Text
-            style={styles.backText}
-          >
-            ← Back
-          </Text>
-        </Pressable>
-
-        <View style={styles.header}>
-          <Text style={styles.title}>
-            Review
-          </Text>
-
-          <Text
-            style={styles.topicName}
-          >
-            {allTopics ? currentFlashcard.topicName : topicName}
-          </Text>
-
-          <Text
-            style={styles.subtitle}
-          >
-            Review your due flashcards
-            and strengthen your memory.
-          </Text>
-        </View>
-
-        <View
-          style={styles.progressHeader}
-        >
-          <Text
-            style={styles.progressText}
-          >
-            Card {currentIndex + 1} of{' '}
-            {flashcards.length}
-          </Text>
-
-          <Text
-            style={
-              styles.progressPercent
-            }
-          >
-            {progressPercent}%
-          </Text>
-        </View>
-
-        <View
-          style={
-            styles.progressBackground
-          }
-        >
-          <View
-            style={[
-              styles.progressFill,
-              {
-                width: `${progressPercent}%`,
-              },
-            ]}
-          />
-        </View>
-
-        <View
-          style={styles.questionCard}
-        >
-          <Text
-            style={styles.questionLabel}
-          >
-            Question
-          </Text>
-
-          <Text
-            style={styles.question}
-          >
-            {currentFlashcard.front}
-          </Text>
-        </View>
-
-        {!showAnswer ? (
-          <Pressable
-            style={styles.showButton}
-            onPress={() =>
-              setShowAnswer(true)
-            }
-          >
-            <Text
-              style={
-                styles.showButtonText
-              }
-            >
-              Show answer
-            </Text>
-          </Pressable>
-        ) : (
-          <>
-            <View
-              style={styles.answerCard}
-            >
-              <Text
-                style={
-                  styles.answerLabel
-                }
-              >
-                Answer
-              </Text>
-
-              <Text
-                style={styles.answer}
-              >
-                {currentFlashcard.back}
-              </Text>
-            </View>
-
-            <View
-              style={styles.ratingSection}
-            >
-              <Text
-                style={
-                  styles.ratingTitle
-                }
-              >
-                How well did you remember
-                this?
-              </Text>
-
-              <Text
-                style={
-                  styles.ratingSubtitle
-                }
-              >
-                Your answer determines when
-                this card appears again.
-              </Text>
-
-              <View
-                style={styles.ratingButtons}
-              >
-                <Pressable
-                  style={[
-                    styles.ratingButton,
-                    styles.againButton,
-                  ]}
-                  disabled={saving}
-                  onPress={() =>
-                    handleRating(
-                      'again'
-                    )
-                  }
-                >
-                  <Text
-                    style={
-                      styles.ratingButtonTitle
-                    }
-                  >
-                    Again
-                  </Text>
-
-                  <Text
-                    style={
-                      styles.ratingButtonText
-                    }
-                  >
-                    Tomorrow
-                  </Text>
-                </Pressable>
-
-                <Pressable
-                  style={[
-                    styles.ratingButton,
-                    styles.hardButton,
-                  ]}
-                  disabled={saving}
-                  onPress={() =>
-                    handleRating(
-                      'hard'
-                    )
-                  }
-                >
-                  <Text
-                    style={
-                      styles.ratingButtonTitle
-                    }
-                  >
-                    Hard
-                  </Text>
-
-                  <Text
-                    style={
-                      styles.ratingButtonText
-                    }
-                  >
-                    In 2 days
-                  </Text>
-                </Pressable>
-
-                <Pressable
-                  style={[
-                    styles.ratingButton,
-                    styles.goodButton,
-                  ]}
-                  disabled={saving}
-                  onPress={() =>
-                    handleRating(
-                      'good'
-                    )
-                  }
-                >
-                  <Text
-                    style={
-                      styles.ratingButtonTitle
-                    }
-                  >
-                    Good
-                  </Text>
-
-                  <Text
-                    style={
-                      styles.ratingButtonText
-                    }
-                  >
-                    In 4 days
-                  </Text>
-                </Pressable>
-
-                <Pressable
-                  style={[
-                    styles.ratingButton,
-                    styles.easyButton,
-                  ]}
-                  disabled={saving}
-                  onPress={() =>
-                    handleRating(
-                      'easy'
-                    )
-                  }
-                >
-                  <Text
-                    style={
-                      styles.ratingButtonTitle
-                    }
-                  >
-                    Easy
-                  </Text>
-
-                  <Text
-                    style={
-                      styles.ratingButtonText
-                    }
-                  >
-                    In 7 days
-                  </Text>
-                </Pressable>
-              </View>
-            </View>
-          </>
-        )}
-
-        <View
-          style={styles.infoCard}
-        >
-          <Text
-            style={styles.infoTitle}
-          >
-            Smart repetition
-          </Text>
-
-          <Text
-            style={styles.infoText}
-          >
-            MedExam uses your rating to
-            decide when this flashcard
-            should appear again. Cards you
-            struggle with return sooner,
-            while cards you know well are
-            scheduled further into the
-            future.
-          </Text>
-        </View>
-      </PullToRefreshScrollView>
+    <SafeAreaView style={ui.container} edges={['top', 'bottom']}>
+      <Stack.Screen options={{ headerShown: false }} />
+      <View style={styles.page}>
+        {bar}
+        {body}
+      </View>
     </SafeAreaView>
   );
 }
 
 const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: appColor('#F7FAFC', 'background'),
-  },
+  page: { flex: 1, paddingHorizontal: 20 },
+  centered: { textAlign: 'center' },
+  bar: { minHeight: 48, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
+  barButton: { width: 44, height: 44, justifyContent: 'center' },
+  barTitle: { flex: 1, color: ink.primary, fontSize: 16, fontWeight: '800', textAlign: 'center' },
+  state: { flex: 1, alignItems: 'center', justifyContent: 'center', gap: 12, paddingHorizontal: 12, paddingBottom: 60 },
+  scroll: { flexGrow: 1, paddingVertical: 16, gap: 12 },
 
-  scrollContent: {
-    padding: 20,
-    paddingBottom: 40,
-  },
+  progress: { gap: 8, marginTop: 4 },
+  progressTop: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 10, minHeight: 26 },
 
-  loadingContainer: {
-    flex: 1,
-    justifyContent: 'center',
-    alignItems: 'center',
-    gap: 12,
-  },
+  card: { flexGrow: 1, minHeight: 260, justifyContent: 'center', padding: 22, gap: 10 },
+  side: { color: ink.muted, fontSize: 11, fontWeight: '800', letterSpacing: 1, textTransform: 'uppercase' },
+  question: { color: ink.primary, fontSize: 21, lineHeight: 29, fontWeight: '700' },
+  divider: { height: StyleSheet.hairlineWidth, backgroundColor: appColor('#D8E6EC', 'border'), marginVertical: 8 },
+  answer: { color: ink.primary, fontSize: 17, lineHeight: 26 },
+  hint: { marginTop: 12 },
 
-  loadingText: {
-    fontSize: 15,
-    color: appColor('#64748B', 'text'),
-  },
+  footer: { gap: 10, paddingTop: 8, paddingBottom: 10 },
+  error: { color: appColor('#A34338', 'text'), fontSize: 13, textAlign: 'center' },
+  show: { minHeight: 56, borderRadius: 18 },
+  showText: { color: '#FFFFFF', fontSize: 16, fontWeight: '800' },
+  ratings: { flexDirection: 'row', gap: 8 },
+  rating: { flex: 1, alignItems: 'center', gap: 4, paddingTop: 0, paddingBottom: 10, borderRadius: 14, overflow: 'hidden', backgroundColor: appColor('#FFFFFF', 'background'), borderWidth: 1, borderColor: appColor('#E7F0F4', 'border'), ...cardShadow },
+  ratingMark: { alignSelf: 'stretch', height: 4, marginBottom: 6 },
+  ratingLabel: { color: ink.primary, fontSize: 14, fontWeight: '800' },
+  ratingWhen: { color: ink.muted, fontSize: 10 },
 
-  backButton: {
-    alignSelf: 'flex-start',
-    marginBottom: 24,
-    paddingVertical: 6,
-  },
-
-  backText: {
-    fontSize: 16,
-    fontWeight: '600',
-    color: appColor('#2563EB', 'text'),
-  },
-
-  header: {
-    marginBottom: 24,
-  },
-
-  title: {
-    fontSize: 32,
-    fontWeight: '800',
-    color: appColor('#0F172A', 'text'),
-  },
-
-  topicName: {
-    marginTop: 6,
-    fontSize: 18,
-    fontWeight: '700',
-    color: appColor('#2563EB', 'text'),
-  },
-
-  subtitle: {
-    marginTop: 8,
-    fontSize: 15,
-    lineHeight: 22,
-    color: appColor('#64748B', 'text'),
-  },
-
-  progressHeader: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    marginBottom: 8,
-  },
-
-  progressText: {
-    fontSize: 14,
-    fontWeight: '600',
-    color: appColor('#475569', 'text'),
-  },
-
-  progressPercent: {
-    fontSize: 14,
-    fontWeight: '700',
-    color: appColor('#2563EB', 'text'),
-  },
-
-  progressBackground: {
-    height: 8,
-    borderRadius: 10,
-    backgroundColor: appColor('#E2E8F0', 'background'),
-    overflow: 'hidden',
-    marginBottom: 24,
-  },
-
-  progressFill: {
-    height: '100%',
-    borderRadius: 10,
-    backgroundColor: appColor('#3B82F6', 'background'),
-  },
-
-  questionCard: {
-    backgroundColor: appColor('#FFFFFF', 'background'),
-    borderRadius: 20,
-    padding: 24,
-    borderWidth: 1,
-    borderColor: appColor('#E2E8F0', 'border'),
-    marginBottom: 16,
-  },
-
-  questionLabel: {
-    fontSize: 13,
-    fontWeight: '700',
-    color: appColor('#2563EB', 'text'),
-    textTransform: 'uppercase',
-    letterSpacing: 0.5,
-    marginBottom: 12,
-  },
-
-  question: {
-    fontSize: 22,
-    lineHeight: 31,
-    fontWeight: '700',
-    color: appColor('#0F172A', 'text'),
-  },
-
-  showButton: {
-    backgroundColor: appColor('#2563EB', 'background'),
-    borderRadius: 16,
-    paddingVertical: 17,
-    alignItems: 'center',
-    marginBottom: 16,
-  },
-
-  showButtonText: {
-    color: appColor('#FFFFFF', 'text'),
-    fontSize: 16,
-    fontWeight: '700',
-  },
-
-  answerCard: {
-    backgroundColor: appColor('#EFF6FF', 'background'),
-    borderRadius: 20,
-    padding: 24,
-    borderWidth: 1,
-    borderColor: appColor('#BFDBFE', 'border'),
-    marginBottom: 20,
-  },
-
-  answerLabel: {
-    fontSize: 13,
-    fontWeight: '700',
-    color: appColor('#2563EB', 'text'),
-    textTransform: 'uppercase',
-    letterSpacing: 0.5,
-    marginBottom: 12,
-  },
-
-  answer: {
-    fontSize: 18,
-    lineHeight: 28,
-    color: appColor('#1E293B', 'text'),
-  },
-
-  ratingSection: {
-    marginBottom: 20,
-  },
-
-  ratingTitle: {
-    fontSize: 18,
-    fontWeight: '800',
-    color: appColor('#0F172A', 'text'),
-  },
-
-  ratingSubtitle: {
-    marginTop: 6,
-    marginBottom: 14,
-    fontSize: 14,
-    lineHeight: 20,
-    color: appColor('#64748B', 'text'),
-  },
-
-  ratingButtons: {
-    gap: 10,
-  },
-
-  ratingButton: {
-    borderRadius: 14,
-    paddingVertical: 14,
-    paddingHorizontal: 18,
-    borderWidth: 1,
-  },
-
-  againButton: {
-    backgroundColor: appColor('#FEF2F2', 'background'),
-    borderColor: appColor('#FECACA', 'border'),
-  },
-
-  hardButton: {
-    backgroundColor: appColor('#FFF7ED', 'background'),
-    borderColor: appColor('#FED7AA', 'border'),
-  },
-
-  goodButton: {
-    backgroundColor: appColor('#F0FDF4', 'background'),
-    borderColor: appColor('#BBF7D0', 'border'),
-  },
-
-  easyButton: {
-    backgroundColor: appColor('#EFF6FF', 'background'),
-    borderColor: appColor('#BFDBFE', 'border'),
-  },
-
-  ratingButtonTitle: {
-    fontSize: 16,
-    fontWeight: '800',
-    color: appColor('#0F172A', 'text'),
-  },
-
-  ratingButtonText: {
-    marginTop: 2,
-    fontSize: 13,
-    color: appColor('#64748B', 'text'),
-  },
-
-  infoCard: {
-    backgroundColor: appColor('#FFFFFF', 'background'),
-    borderRadius: 18,
-    padding: 20,
-    borderWidth: 1,
-    borderColor: appColor('#E2E8F0', 'border'),
-    marginTop: 8,
-  },
-
-  infoTitle: {
-    fontSize: 16,
-    fontWeight: '800',
-    color: appColor('#0F172A', 'text'),
-    marginBottom: 8,
-  },
-
-  infoText: {
-    fontSize: 14,
-    lineHeight: 21,
-    color: appColor('#64748B', 'text'),
-  },
-
-  finishedHeader: {
-    marginBottom: 24,
-  },
-
-  finishedTitle: {
-    fontSize: 32,
-    fontWeight: '800',
-    color: appColor('#0F172A', 'text'),
-  },
-
-  finishedTopic: {
-    marginTop: 6,
-    fontSize: 18,
-    fontWeight: '700',
-    color: appColor('#2563EB', 'text'),
-  },
-
-  finishedSubtitle: {
-    marginTop: 8,
-    fontSize: 15,
-    lineHeight: 22,
-    color: appColor('#64748B', 'text'),
-  },
-
-  summaryCard: {
-    backgroundColor: appColor('#FFFFFF', 'background'),
-    borderRadius: 20,
-    padding: 24,
-    borderWidth: 1,
-    borderColor: appColor('#E2E8F0', 'border'),
-    marginBottom: 16,
-  },
-
-  summaryLabel: {
-    fontSize: 14,
-    fontWeight: '700',
-    color: appColor('#64748B', 'text'),
-  },
-
-  summaryValue: {
-    marginTop: 4,
-    fontSize: 42,
-    fontWeight: '800',
-    color: appColor('#0F172A', 'text'),
-  },
-
-  ratingRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    marginTop: 20,
-  },
-
-  ratingItem: {
-    alignItems: 'center',
-  },
-
-  ratingNumber: {
-    fontSize: 20,
-    fontWeight: '800',
-    color: appColor('#0F172A', 'text'),
-  },
-
-  ratingLabel: {
-    marginTop: 3,
-    fontSize: 12,
-    color: appColor('#64748B', 'text'),
-  },
-
-  savedCard: {
-    backgroundColor: appColor('#F0FDF4', 'background'),
-    borderRadius: 18,
-    padding: 20,
-    borderWidth: 1,
-    borderColor: appColor('#BBF7D0', 'border'),
-    marginBottom: 16,
-  },
-
-  savedTitle: {
-    fontSize: 16,
-    fontWeight: '800',
-    color: appColor('#166534', 'text'),
-    marginBottom: 6,
-  },
-
-  savedText: {
-    fontSize: 14,
-    lineHeight: 21,
-    color: appColor('#166534', 'text'),
-  },
-
-  nextButton: {
-    backgroundColor: appColor('#2563EB', 'background'),
-    borderRadius: 16,
-    paddingVertical: 17,
-    alignItems: 'center',
-    marginTop: 8,
-  },
-
-  nextButtonText: {
-    color: appColor('#FFFFFF', 'text'),
-    fontSize: 16,
-    fontWeight: '700',
-  },
-
-  emptyHeader: {
-    marginBottom: 24,
-  },
-
-  emptyTitle: {
-    fontSize: 32,
-    fontWeight: '800',
-    color: appColor('#0F172A', 'text'),
-  },
+  doneCard: { alignItems: 'center', paddingVertical: 26 },
+  doneIcon: { width: 60, height: 60, borderRadius: 30, alignItems: 'center', justifyContent: 'center' },
+  doneTitle: { color: ink.primary, fontSize: 22, fontWeight: '800' },
+  summary: { flexDirection: 'row', alignSelf: 'stretch', marginTop: 6 },
+  summaryItem: { flex: 1, alignItems: 'center', gap: 3 },
+  summaryTop: { flexDirection: 'row', alignItems: 'center', gap: 6 },
+  summaryValue: { color: ink.primary, fontSize: 20, fontWeight: '800' },
+  wide: { alignSelf: 'stretch' },
 });

@@ -1,484 +1,303 @@
-import { LocalizedText as Text } from '@/components/localized-text';
+import { cardShadow } from '@/components/gloss';
+import { IconChip } from '@/components/study/icon-chip';
+import { ProgressBar } from '@/components/charts';
+import { ink, p, useProgressPalette } from '@/components/progress/theme';
+import PullToRefreshScrollView from '@/components/pull-to-refresh-scroll-view';
+import { Segments } from '@/components/study/study-ui';
+import { SubjectGlyph } from '@/components/study/subject-glyph';
+import { StudyIcon } from '@/components/study-icon';
 import { appColor } from '@/constants/adaptive-color';
-import { useCallback, useState } from 'react';
-import { router, useFocusEffect } from 'expo-router';
+import { ui } from '@/constants/ui';
+import { useStudyData } from '@/hooks/use-study-data';
+import { useAppSettings } from '@/services/app-settings-context';
+import { getDaysUntil } from '@/services/dates';
+import { deleteSubjectAndData, saveSubjects } from '@/services/storage';
+import type { Subject } from '@/types/study';
+import { Stack, router } from 'expo-router';
+import { useState } from 'react';
 import {
-  Alert,
-  Pressable,
-  StyleSheet,
-  TextInput,
-  View,
+  ActivityIndicator, Alert, KeyboardAvoidingView, Modal, Platform, Pressable, StyleSheet, Text, TextInput, View,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { deleteSubjectAndData, getSubjects as readSubjects, getTopicsBySubject, saveSubjects as writeSubjects } from '../../services/storage';
-import type { Subject, TopicsBySubject } from '../../types/study';
-import PullToRefreshScrollView from '../../components/pull-to-refresh-scroll-view';
 
+const MAX_SUBJECT_NAME_LENGTH = 60;
+type Filter = 'all' | 'active' | 'upcoming' | 'completed';
+
+/** The Subjects tab: every subject with its topics, exam and progress. */
 export default function SubjectsScreen() {
-  const [subjects, setSubjects] = useState<Subject[]>([]);
-  const [topicsBySubject, setTopicsBySubject] = useState<TopicsBySubject>({});
-  const [showForm, setShowForm] = useState(false);
-  const [subjectName, setSubjectName] = useState('');
-  const [editingSubjectId, setEditingSubjectId] = useState<string | number | null>(
-    null
-  );
-  const [loading, setLoading] = useState(true);
+  const { preferences } = useAppSettings();
+  const language = preferences.language;
+  const L = (en: string, no: string) => (language === 'no' ? no : en);
+  const palette = useProgressPalette();
+  const { loading, data, metrics, todayKey, reload } = useStudyData();
 
-  useFocusEffect(useCallback(() => {
-    let active = true;
-    loadSubjects(active);
-    return () => { active = false; };
-  }, []));
+  const [query, setQuery] = useState('');
+  const [filter, setFilter] = useState<Filter>('all');
+  const [formVisible, setFormVisible] = useState(false);
+  const [editingId, setEditingId] = useState<Subject['id'] | null>(null);
+  const [name, setName] = useState('');
+  const [formError, setFormError] = useState('');
+  const [saving, setSaving] = useState(false);
 
-  async function loadSubjects(active = true) {
-    try {
-      const [savedSubjects, savedTopics] = await Promise.all([readSubjects(), getTopicsBySubject()]);
-      if (active) { setSubjects(savedSubjects); setTopicsBySubject(savedTopics); }
-    } catch (error) {
-      console.log('Could not load subjects:', error);
-    } finally {
-      if (active) setLoading(false);
-    }
-  }
+  const subjects = data?.subjects ?? [];
+  const cards = subjects.map((subject, index) => {
+    const subjectId = String(subject.id);
+    const summary = metrics?.subjects.find((item) => item.subjectId === subjectId);
+    const topics = (data?.topicsBySubject[subjectId] ?? []).length;
+    const exam = data?.exams[subjectId];
+    const examDays = exam ? getDaysUntil(exam.date, todayKey) : -1;
+    const progress = summary?.progress ?? 0;
+    const completed = topics > 0 && (summary?.completed ?? 0) >= topics;
+    return { subject, subjectId, index, topics, examDays, progress, completed, active: progress > 0 && !completed };
+  });
 
-  // Save subjects permanently
-  async function persistSubjects(updatedSubjects: Subject[]): Promise<boolean> {
-    try {
-      await writeSubjects(updatedSubjects);
-      setSubjects(updatedSubjects);
-      return true;
-    } catch (error) {
-      console.log('Could not save subjects:', error);
-      Alert.alert('Could not save', 'Your changes were not saved. Please try again.');
-      return false;
-    }
-  }
+  const search = query.trim().toLocaleLowerCase();
+  const shown = cards.filter((card) => {
+    if (search && !card.subject.name.toLocaleLowerCase().includes(search)) return false;
+    if (filter === 'active') return card.active;
+    if (filter === 'upcoming') return card.examDays >= 0;
+    if (filter === 'completed') return card.completed;
+    return true;
+  }).sort((left, right) => (filter === 'upcoming' ? left.examDays - right.examDays : 0));
 
-  function openAddForm() {
-    setEditingSubjectId(null);
-    setSubjectName('');
-    setShowForm(true);
-  }
-
-  function openEditForm(subject: Subject) {
-    setEditingSubjectId(subject.id);
-    setSubjectName(subject.name);
-    setShowForm(true);
+  function openForm(subject: Subject | null) {
+    setEditingId(subject?.id ?? null);
+    setName(subject?.name ?? '');
+    setFormError('');
+    setFormVisible(true);
   }
 
   async function saveSubject() {
-    const trimmedName = subjectName.trim();
-
-    if (!trimmedName) {
+    const trimmed = name.trim();
+    if (!trimmed || saving) return;
+    if (subjects.some((subject) => subject.id !== editingId && subject.name.trim().toLocaleLowerCase() === trimmed.toLocaleLowerCase())) {
+      setFormError(L('You already have a subject with this name.', 'Du har allerede et emne med dette navnet.'));
       return;
     }
-
-    let updatedSubjects: Subject[];
-
-    if (editingSubjectId !== null) {
-      updatedSubjects = subjects.map((subject) =>
-        subject.id === editingSubjectId
-          ? { ...subject, name: trimmedName }
-          : subject
-      );
-    } else {
-      const newSubject: Subject = {
-        id: Date.now(),
-        name: trimmedName,
-      };
-
-      updatedSubjects = [...subjects, newSubject];
+    const updated = editingId !== null
+      ? subjects.map((subject) => (subject.id === editingId ? { ...subject, name: trimmed } : subject))
+      : [...subjects, { id: Date.now(), name: trimmed }];
+    setSaving(true);
+    try {
+      await saveSubjects(updated);
+      await reload();
+      setFormVisible(false);
+    } catch (error) {
+      console.warn('Could not save subjects:', error);
+      setFormError(L('Your changes were not saved. Try again.', 'Endringene ble ikke lagret. Prøv igjen.'));
+    } finally {
+      setSaving(false);
     }
-
-    if (!await persistSubjects(updatedSubjects)) return;
-
-    setSubjectName('');
-    setEditingSubjectId(null);
-    setShowForm(false);
   }
 
-  function deleteSubject(subject: Subject) {
+  function confirmDelete(subject: Subject) {
     Alert.alert(
-      'Delete subject',
-      `This will remove ${subject.name}, its topics, exam plan, study history, quizzes and flashcards. A recovery copy will be available from Profile.`,
+      L('Delete subject?', 'Slette emnet?'),
+      L(
+        `This removes ${subject.name} with its topics, exam, study history, quizzes and flashcards. A recovery copy is kept under Profile.`,
+        `Dette fjerner ${subject.name} med temaer, eksamen, studiehistorikk, quizer og flashcards. En gjenopprettingskopi ligger under Profil.`,
+      ),
       [
+        { text: L('Cancel', 'Avbryt'), style: 'cancel' },
         {
-          text: 'Cancel',
-          style: 'cancel',
-        },
-        {
-          text: 'Delete',
+          text: L('Delete', 'Slett'),
           style: 'destructive',
           onPress: async () => {
             try {
               await deleteSubjectAndData(subject.id);
-              await loadSubjects();
+              await reload();
             } catch (error) {
-              console.error('Could not remove subject data:', error);
-              Alert.alert('Could not finish deleting', 'A recovery copy was made before deletion. Check Profile before trying again.');
+              console.warn('Could not remove subject data:', error);
+              Alert.alert(L('Could not finish deleting', 'Kunne ikke fullføre slettingen'), L('A recovery copy was made first. Check Profile before trying again.', 'En gjenopprettingskopi ble laget først. Sjekk Profil før du prøver igjen.'));
             }
           },
         },
-      ]
+      ],
     );
   }
 
-  function showSubjectMenu(subject: Subject) {
-    Alert.alert(subject.name, 'What would you like to do?', [
-      {
-        text: 'Edit',
-        onPress: () => openEditForm(subject),
-      },
-      {
-        text: 'Delete',
-        style: 'destructive',
-        onPress: () => deleteSubject(subject),
-      },
-      {
-        text: 'Cancel',
-        style: 'cancel',
-      },
+  function openMenu(subject: Subject) {
+    Alert.alert(subject.name, undefined, [
+      { text: L('Rename', 'Gi nytt navn'), onPress: () => openForm(subject) },
+      { text: L('Delete', 'Slett'), style: 'destructive', onPress: () => confirmDelete(subject) },
+      { text: L('Cancel', 'Avbryt'), style: 'cancel' },
     ]);
   }
 
-  function openSubject(subject: Subject) {
-    router.push({
-      pathname: '/subject/[id]',
-      params: {
-        id: subject.id.toString(),
-        name: subject.name,
-      },
-    });
+  const openSubject = (subject: Subject) => router.push({ pathname: '/subject/[id]', params: { id: String(subject.id), name: subject.name } });
+
+  const form = (
+    <Modal visible={formVisible} transparent animationType="slide" onRequestClose={() => { if (!saving) setFormVisible(false); }}>
+      <KeyboardAvoidingView style={ui.modalKeyboard} behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
+        <Pressable style={ui.modalBackdrop} onPress={() => { if (!saving) setFormVisible(false); }} accessibilityLabel={L('Cancel', 'Avbryt')}>
+          <Pressable style={ui.modalCard} onPress={() => undefined} accessible={false}>
+            <View style={ui.modalHeader}>
+              <View style={ui.modalIcon}><StudyIcon name="layers" size={18} color={palette.accent} /></View>
+              <View style={ui.grow}>
+                <Text style={ui.modalTitle}>{editingId !== null ? L('Rename subject', 'Gi emnet nytt navn') : L('New subject', 'Nytt emne')}</Text>
+                <Text style={ui.cardDescription}>{editingId !== null ? L('Topics, exam and progress stay with the subject.', 'Temaer, eksamen og fremgang følger emnet.') : L('You add topics and an exam date next.', 'Du legger til temaer og eksamensdato etterpå.')}</Text>
+              </View>
+            </View>
+            <Text style={ui.fieldLabel}>{L('SUBJECT NAME', 'NAVN PÅ EMNET')}</Text>
+            <TextInput
+              value={name}
+              onChangeText={(value) => { setName(value); setFormError(''); }}
+              placeholder={L('e.g. Pharmacology', 'f.eks. Farmakologi')}
+              placeholderTextColor={appColor('#91A2AE', 'text')}
+              style={ui.textInput}
+              maxLength={MAX_SUBJECT_NAME_LENGTH}
+              autoFocus
+              autoCapitalize="sentences"
+              returnKeyType="done"
+              onSubmitEditing={() => { void saveSubject(); }}
+              accessibilityLabel={L('Subject name', 'Navn på emnet')}
+            />
+            {formError ? <Text style={ui.formError}>{formError}</Text> : null}
+            <View style={ui.modalActions}>
+              <Pressable accessibilityRole="button" style={ui.secondaryButton} onPress={() => setFormVisible(false)} disabled={saving}>
+                <Text style={ui.secondaryButtonText}>{L('Cancel', 'Avbryt')}</Text>
+              </Pressable>
+              <Pressable accessibilityRole="button" style={[ui.primaryButton, (!name.trim() || saving) && ui.disabled]} onPress={() => { void saveSubject(); }} disabled={!name.trim() || saving}>
+                {saving ? <ActivityIndicator color="#FFFFFF" /> : <Text style={ui.primaryButtonText}>{editingId !== null ? L('Save', 'Lagre') : L('Add subject', 'Legg til emne')}</Text>}
+              </Pressable>
+            </View>
+          </Pressable>
+        </Pressable>
+      </KeyboardAvoidingView>
+    </Modal>
+  );
+
+  let body;
+  if (!data) {
+    body = <View style={styles.state}>{loading ? <ActivityIndicator color={palette.accent} /> : <Text style={p.body}>{L('Your subjects could not be loaded. Pull down to try again.', 'Emnene kunne ikke lastes inn. Dra ned for å prøve igjen.')}</Text>}</View>;
+  } else if (subjects.length === 0) {
+    body = (
+      <View style={[p.card, p.empty]}>
+        <IconChip name="layers" />
+        <Text style={p.emptyTitle}>{L('No subjects yet', 'Ingen emner ennå')}</Text>
+        <Text style={[p.body, styles.centered]}>{L('Add the first subject you are studying. Topics, exam and study plan come next.', 'Legg til det første emnet du leser. Temaer, eksamen og studieplan kommer etterpå.')}</Text>
+        <Pressable accessibilityRole="button" onPress={() => openForm(null)} style={({ pressed }) => [p.button, styles.wide, { backgroundColor: palette.accent }, pressed && p.pressed]}>
+          <Text style={p.buttonText}>{L('Add subject', 'Legg til emne')}</Text>
+        </Pressable>
+      </View>
+    );
+  } else {
+    body = (
+      <>
+        <View style={styles.search}>
+          <StudyIcon name="search" size={17} color={ink.muted} />
+          <TextInput
+            value={query}
+            onChangeText={setQuery}
+            placeholder={L('Search subjects', 'Søk i emner')}
+            placeholderTextColor={appColor('#91A2AE', 'text')}
+            style={styles.searchInput}
+            returnKeyType="search"
+            autoCorrect={false}
+            clearButtonMode="while-editing"
+            accessibilityLabel={L('Search subjects', 'Søk i emner')}
+          />
+        </View>
+
+        <Segments<Filter>
+          value={filter}
+          onChange={setFilter}
+          items={[
+            { key: 'all', label: L('All', 'Alle') },
+            { key: 'active', label: L('Active', 'Aktive') },
+            { key: 'upcoming', label: L('Exam', 'Eksamen') },
+            { key: 'completed', label: L('Done', 'Fullført') },
+          ]}
+        />
+
+        {shown.length === 0 ? (
+          <View style={[p.card, p.empty]}>
+            <Text style={[p.body, styles.centered]}>{search
+              ? L('No subjects match your search.', 'Ingen emner passer til søket.')
+              : filter === 'active' ? L('No subjects in progress yet.', 'Ingen påbegynte emner ennå.')
+              : filter === 'upcoming' ? L('No subjects have an exam date yet.', 'Ingen emner har eksamensdato ennå.')
+              : L('No completed subjects yet.', 'Ingen fullførte emner ennå.')}</Text>
+          </View>
+        ) : shown.map((card) => {
+          const topicText = `${card.topics} ${card.topics === 1 ? L('topic', 'tema') : L('topics', 'temaer')}`;
+          const examText = card.examDays === 0 ? L('Exam today', 'Eksamen i dag')
+            : card.examDays === 1 ? L('Exam tomorrow', 'Eksamen i morgen')
+            : card.examDays > 1 ? L(`Exam in ${card.examDays} days`, `Eksamen om ${card.examDays} dager`)
+            : L('No exam planned', 'Ingen eksamen planlagt');
+          return (
+            <Pressable
+              key={card.subjectId}
+              accessibilityRole="button"
+              accessibilityLabel={`${card.subject.name}. ${topicText}. ${examText}. ${card.progress}%`}
+              accessibilityHint={L('Hold for rename and delete', 'Hold inne for å gi nytt navn eller slette')}
+              onPress={() => openSubject(card.subject)}
+              onLongPress={() => openMenu(card.subject)}
+              style={({ pressed }) => [styles.row, pressed && p.pressed]}
+            >
+              <SubjectGlyph name={card.subject.name} index={card.index} />
+              <View style={p.grow}>
+                <Text style={styles.rowTitle} numberOfLines={1}>{card.subject.name}</Text>
+                <Text style={styles.rowDetail} numberOfLines={1}>{topicText} · {examText}</Text>
+                <View style={styles.rowProgress}>
+                  <View style={p.grow}><ProgressBar value={card.progress} color={palette.accent} trackColor={palette.track} height={5} /></View>
+                  <Text style={styles.rowPercent}>{card.progress}%</Text>
+                </View>
+              </View>
+              <StudyIcon name="chevron" size={12} color={ink.muted} />
+            </Pressable>
+          );
+        })}
+
+        <Pressable accessibilityRole="button" onPress={() => openForm(null)} style={({ pressed }) => [styles.add, pressed && p.pressed]}>
+          <StudyIcon name="plus" size={16} color={palette.accent} />
+          <Text style={[styles.addText, { color: palette.accent }]}>{L('Add subject', 'Legg til emne')}</Text>
+        </Pressable>
+        <Text style={[p.small, styles.centered]}>{L('Hold a subject to rename or delete it.', 'Hold inne et emne for å gi det nytt navn eller slette det.')}</Text>
+      </>
+    );
   }
 
   return (
-    <SafeAreaView style={styles.container}>
-      <PullToRefreshScrollView onRefresh={() => loadSubjects()} contentContainerStyle={styles.scrollContent}>
-      <Text style={styles.title}>Your subjects</Text>
-
-      <Text style={styles.subtitle}>
-        Add and manage the subjects you are preparing for your exams.
-      </Text>
-
-      {loading ? (
-        <View style={styles.loadingContainer}>
-          <Text style={styles.loadingText}>Loading subjects...</Text>
-        </View>
-      ) : subjects.length === 0 ? (
-        <View style={styles.emptyCard}>
-          <Text style={styles.icon}>📚</Text>
-
-          <Text style={styles.emptyTitle}>No subjects yet</Text>
-
-          <Text style={styles.emptyText}>
-            Add your first subject to start building your study plan.
-          </Text>
-        </View>
-      ) : (
-        <View style={styles.subjectList}>
-          {subjects.map((subject) => (
-            <View key={subject.id} style={styles.subjectRow}>
-              <Pressable
-                style={({ pressed }) => [
-                  styles.subjectCard,
-                  pressed && styles.subjectCardPressed,
-                ]}
-                onPress={() => openSubject(subject)}
-              >
-                <View style={styles.subjectIcon}>
-                  <Text style={styles.subjectEmoji}>📚</Text>
-                </View>
-
-                <View style={styles.subjectContent}>
-                  <Text style={styles.subjectName}>
-                    {subject.name}
-                  </Text>
-
-                  <Text style={styles.topicText}>
-                    {(topicsBySubject[String(subject.id)] ?? []).length}{' '}
-                    {(topicsBySubject[String(subject.id)] ?? []).length === 1 ? 'topic' : 'topics'}
-                  </Text>
-                </View>
-
-                <Text style={styles.arrow}>›</Text>
-              </Pressable>
-
-              <Pressable
-                style={styles.menuButton}
-                onPress={() => showSubjectMenu(subject)}
-              >
-                <Text style={styles.menuText}>•••</Text>
-              </Pressable>
-            </View>
-          ))}
-        </View>
-      )}
-
-      {showForm && (
-        <View style={styles.formCard}>
-          <View style={styles.formHeader}>
-            <Text style={styles.formTitle}>
-              {editingSubjectId !== null
-                ? 'Edit subject'
-                : 'Add a subject'}
-            </Text>
-
-            <Pressable
-              onPress={() => {
-                setShowForm(false);
-                setSubjectName('');
-                setEditingSubjectId(null);
-              }}
-            >
-              <Text style={styles.closeButton}>✕</Text>
-            </Pressable>
+    <SafeAreaView style={ui.container} edges={['top']}>
+      <Stack.Screen options={{ headerShown: false }} />
+      <PullToRefreshScrollView contentContainerStyle={styles.content} showsVerticalScrollIndicator={false} keyboardShouldPersistTaps="handled" onRefresh={reload}>
+        <View style={styles.header}>
+          <View style={p.grow}>
+            <Text style={ui.eyebrow}>{L('YOUR STUDY LIBRARY', 'DITT STUDIEBIBLIOTEK')}</Text>
+            <Text style={styles.title} accessibilityRole="header">{L('Subjects', 'Emner')}</Text>
           </View>
-
-          <Text style={styles.inputLabel}>Subject name</Text>
-
-          <TextInput
-            style={styles.input}
-            placeholder="e.g. Pharmacology"
-            placeholderTextColor={appColor('#9AAAB5', 'text')}
-            value={subjectName}
-            onChangeText={setSubjectName}
-            autoFocus
-          />
-
-          <Pressable
-            style={styles.saveButton}
-            onPress={saveSubject}
-          >
-            <Text style={styles.saveButtonText}>
-              {editingSubjectId !== null
-                ? 'Save changes'
-                : 'Add subject'}
-            </Text>
+          <Pressable accessibilityRole="button" accessibilityLabel={L('Settings', 'Innstillinger')} onPress={() => router.push('/settings')} style={({ pressed }) => [styles.headerButton, pressed && p.pressed]} hitSlop={6}>
+            <StudyIcon name="settings" size={19} color={ink.secondary} />
+          </Pressable>
+          <Pressable accessibilityRole="button" accessibilityLabel={L('Add subject', 'Legg til emne')} onPress={() => openForm(null)} style={({ pressed }) => [styles.headerButton, styles.headerPrimary, { backgroundColor: palette.accent }, pressed && p.pressed]} hitSlop={6}>
+            <StudyIcon name="plus" size={20} color="#FFFFFF" />
           </Pressable>
         </View>
-      )}
-
-      {!showForm && (
-        <Pressable
-          style={styles.addButton}
-          onPress={openAddForm}
-        >
-          <Text style={styles.addButtonText}>
-            + Add subject
-          </Text>
-        </Pressable>
-      )}
+        <Text style={styles.subtitle}>{L('Manage your subjects and follow your progress.', 'Administrer emnene dine og følg fremgangen.')}</Text>
+        {body}
       </PullToRefreshScrollView>
+      {form}
     </SafeAreaView>
   );
 }
 
 const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: appColor('#F7FBFE', 'background'),
-    paddingHorizontal: 20,
-  },
-
-  scrollContent: { flexGrow: 1, paddingBottom: 28 },
-
-  title: {
-    fontSize: 30,
-    fontWeight: '800',
-    color: appColor('#17324D', 'text'),
-    marginTop: 20,
-  },
-
-  subtitle: {
-    fontSize: 15,
-    color: appColor('#7A8B99', 'text'),
-    lineHeight: 22,
-    marginTop: 8,
-    marginBottom: 28,
-  },
-
-  loadingContainer: {
-    alignItems: 'center',
-    marginTop: 40,
-  },
-
-  loadingText: {
-    fontSize: 14,
-    color: appColor('#8494A0', 'text'),
-  },
-
-  emptyCard: {
-    backgroundColor: appColor('#FFFFFF', 'background'),
-    borderRadius: 22,
-    padding: 28,
-    alignItems: 'center',
-  },
-
-  icon: {
-    fontSize: 42,
-    marginBottom: 12,
-  },
-
-  emptyTitle: {
-    fontSize: 20,
-    fontWeight: '700',
-    color: appColor('#17324D', 'text'),
-  },
-
-  emptyText: {
-    fontSize: 14,
-    color: appColor('#7A8B99', 'text'),
-    textAlign: 'center',
-    lineHeight: 21,
-    marginTop: 8,
-  },
-
-  addButton: {
-    backgroundColor: appColor('#75C9ED', 'background'),
-    borderRadius: 18,
-    paddingVertical: 17,
-    alignItems: 'center',
-    marginTop: 18,
-  },
-
-  addButtonText: {
-    color: appColor('#FFFFFF', 'text'),
-    fontSize: 16,
-    fontWeight: '700',
-  },
-
-  subjectList: {
-    width: '100%',
-  },
-
-  subjectRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    marginBottom: 12,
-  },
-
-  subjectCard: {
-    flex: 1,
-    backgroundColor: appColor('#FFFFFF', 'background'),
-    borderRadius: 18,
-    padding: 16,
-    flexDirection: 'row',
-    alignItems: 'center',
-    minHeight: 80,
-  },
-
-  subjectCardPressed: {
-    opacity: 0.7,
-  },
-
-  subjectIcon: {
-    width: 48,
-    height: 48,
-    borderRadius: 14,
-    backgroundColor: appColor('#E3F5FF', 'background'),
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-
-  subjectEmoji: {
-    fontSize: 22,
-  },
-
-  subjectContent: {
-    flex: 1,
-    marginLeft: 14,
-  },
-
-  subjectName: {
-    fontSize: 17,
-    fontWeight: '700',
-    color: appColor('#17324D', 'text'),
-  },
-
-  topicText: {
-    fontSize: 13,
-    color: appColor('#8494A0', 'text'),
-    marginTop: 4,
-  },
-
-  arrow: {
-    fontSize: 28,
-    fontWeight: '300',
-    color: appColor('#9AB5C4', 'text'),
-    marginLeft: 8,
-  },
-
-  menuButton: {
-    width: 48,
-    height: 56,
-    marginLeft: 6,
-    backgroundColor: appColor('#FFFFFF', 'background'),
-    borderRadius: 18,
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-
-  menuText: {
-    fontSize: 17,
-    fontWeight: '700',
-    color: appColor('#7A8B99', 'text'),
-    letterSpacing: 2,
-  },
-
-  formCard: {
-    backgroundColor: appColor('#FFFFFF', 'background'),
-    borderRadius: 22,
-    padding: 20,
-    marginTop: 18,
-  },
-
-  formHeader: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    marginBottom: 20,
-  },
-
-  formTitle: {
-    fontSize: 20,
-    fontWeight: '700',
-    color: appColor('#17324D', 'text'),
-  },
-
-  closeButton: {
-    fontSize: 18,
-    color: appColor('#7A8B99', 'text'),
-  },
-
-  inputLabel: {
-    fontSize: 13,
-    fontWeight: '600',
-    color: appColor('#526775', 'text'),
-    marginBottom: 8,
-  },
-
-  input: {
-    height: 52,
-    borderWidth: 1,
-    borderColor: appColor('#CDEFFF', 'border'),
-    borderRadius: 14,
-    paddingHorizontal: 15,
-    fontSize: 16,
-    color: appColor('#17324D', 'text'),
-    backgroundColor: appColor('#F7FBFE', 'background'),
-  },
-
-  saveButton: {
-    backgroundColor: appColor('#75C9ED', 'background'),
-    borderRadius: 16,
-    paddingVertical: 16,
-    alignItems: 'center',
-    marginTop: 14,
-  },
-
-  saveButtonText: {
-    color: appColor('#FFFFFF', 'text'),
-    fontSize: 16,
-    fontWeight: '700',
-  },
+  content: { paddingHorizontal: 20, paddingTop: 16, paddingBottom: 36, gap: 12 },
+  header: { flexDirection: 'row', alignItems: 'center', gap: 10 },
+  title: { color: ink.primary, fontSize: 34, fontWeight: '800', letterSpacing: -0.5, marginTop: 2 },
+  subtitle: { color: ink.secondary, fontSize: 14, lineHeight: 20, marginTop: -4, marginBottom: 4 },
+  headerButton: { width: 44, height: 44, borderRadius: 14, alignItems: 'center', justifyContent: 'center', backgroundColor: appColor('#FFFFFF', 'background'), borderWidth: 1, borderColor: appColor('#E7F0F4', 'border'), ...cardShadow },
+  headerPrimary: { borderWidth: 0 },
+  state: { alignItems: 'center', paddingVertical: 60 },
+  centered: { textAlign: 'center' },
+  wide: { alignSelf: 'stretch' },
+  search: { flexDirection: 'row', alignItems: 'center', gap: 10, minHeight: 46, paddingHorizontal: 14, borderRadius: 16, backgroundColor: appColor('#FFFFFF', 'background'), borderWidth: 1, borderColor: appColor('#E7F0F4', 'border'), ...cardShadow },
+  searchInput: { flex: 1, color: ink.primary, fontSize: 15, paddingVertical: 10 },
+  row: { flexDirection: 'row', alignItems: 'center', gap: 13, padding: 14, borderRadius: 18, backgroundColor: appColor('#FFFFFF', 'background'), borderWidth: 1, borderColor: appColor('#E7F0F4', 'border'), ...cardShadow },
+  rowTitle: { color: ink.primary, fontSize: 16, fontWeight: '800' },
+  rowDetail: { color: ink.muted, fontSize: 12, marginTop: 3 },
+  rowProgress: { flexDirection: 'row', alignItems: 'center', gap: 10, marginTop: 9 },
+  rowPercent: { color: ink.secondary, fontSize: 11, fontWeight: '700', minWidth: 30, textAlign: 'right' },
+  add: { minHeight: 50, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8, borderRadius: 16, borderWidth: 1, borderStyle: 'dashed', borderColor: appColor('#BFD9E4', 'border') },
+  addText: { fontSize: 14, fontWeight: '800' },
 });

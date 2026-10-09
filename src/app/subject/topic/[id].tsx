@@ -1,177 +1,259 @@
-import { LocalizedText as Text } from '@/components/localized-text';
+import { IconChip, iconTint } from '@/components/study/icon-chip';
+import { ProgressBar } from '@/components/charts';
+import { ink, p, useProgressPalette } from '@/components/progress/theme';
 import PullToRefreshScrollView from '@/components/pull-to-refresh-scroll-view';
-import { StudyIcon } from '@/components/study-icon';
-import { useDayRefresh } from '@/hooks/use-day-refresh';
+import { Hero, MethodTile, PillButton, ScreenBar, SectionHeader, studyStyles } from '@/components/study/study-ui';
+import { TopicMaterialSheet, useTopicNotes } from '@/components/study/topic-notes';
+import { StudyIcon, type StudyIconName } from '@/components/study-icon';
 import { appColor } from '@/constants/adaptive-color';
-import { subscribeToLocalDataChanges } from '@/services/cloud-sync-state';
-import { buildProgressDashboard } from '@/services/progress-dashboard';
-import { getDueFlashcards } from '@/services/study-engine';
-import { getExamsBySubject, getFlashcardReviews, getFlashcards, getQuizResults, getStudyActivity, getSubjects, getTopicsBySubject } from '@/services/storage';
-import type { DashboardTopic } from '@/services/progress-dashboard';
-import type { Exam, Flashcard, FlashcardReview, QuizResult, StudyActivity, Subject, Topic, TopicsBySubject } from '@/types/study';
-import { Stack, router, useFocusEffect, useLocalSearchParams } from 'expo-router';
-import { useCallback, useMemo, useState } from 'react';
-import { ActivityIndicator, AppState, Pressable, StyleSheet, View } from 'react-native';
+import { ui } from '@/constants/ui';
+import { useStudyData } from '@/hooks/use-study-data';
+import { useAppSettings } from '@/services/app-settings-context';
+import { getDaysUntil } from '@/services/dates';
+import { formatStudyTime } from '@/services/progress-metrics';
+import { MASTERED_AT, calculateTopicMastery } from '@/services/topic-mastery';
+import type { StudyActivity } from '@/types/study';
+import { Stack, router, useLocalSearchParams, type Href } from 'expo-router';
+import { useState } from 'react';
+import { ActivityIndicator, Alert, Pressable, StyleSheet, Text, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
-type TopicData = {
-  subjects: Subject[];
-  topicsBySubject: TopicsBySubject;
-  exams: Record<string, Exam | null>;
-  cards: Flashcard[];
-  activities: StudyActivity[];
-  quizResults: QuizResult[];
-  reviews: FlashcardReview[];
+const param = (value: string | string[] | undefined) => (Array.isArray(value) ? value[0] ?? '' : value ?? '');
+
+const ACTIVITY_ICON: Record<StudyActivity['activity'], StudyIconName> = {
+  quiz: 'quiz', active_recall: 'brain', flashcards: 'cards', review: 'review', focus: 'timer',
 };
 
-const EMPTY_DATA: TopicData = { subjects: [], topicsBySubject: {}, exams: {}, cards: [], activities: [], quizResults: [], reviews: [] };
-
-function formatLastStudied(value: string | null) {
-  if (!value) return 'Not studied yet';
-  const date = new Date(value);
-  if (!Number.isFinite(date.getTime())) return 'Not available';
-  const now = new Date();
-  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
-  const day = new Date(date.getFullYear(), date.getMonth(), date.getDate()).getTime();
-  const difference = Math.round((today - day) / 86_400_000);
-  if (difference === 0) return 'Today';
-  if (difference === 1) return 'Yesterday';
-  return date.toLocaleDateString(undefined, { day: 'numeric', month: 'short' });
-}
-
+/** A topic's study page: its own progress, the study methods and what was done recently. */
 export default function TopicScreen() {
-  const params = useLocalSearchParams();
-  const id = Array.isArray(params.id) ? params.id[0] : String(params.id ?? '');
-  const nameParam = Array.isArray(params.name) ? params.name[0] : String(params.name ?? 'Topic');
-  const subjectIdParam = Array.isArray(params.subjectId) ? params.subjectId[0] : String(params.subjectId ?? '');
-  const todayKey = useDayRefresh();
-  const [data, setData] = useState<TopicData>(EMPTY_DATA);
-  const [loading, setLoading] = useState(true);
+  const params = useLocalSearchParams<{ id?: string | string[]; name?: string | string[]; subjectId?: string | string[] }>();
+  const topicId = param(params.id);
+  const { preferences } = useAppSettings();
+  const language = preferences.language;
+  const L = (en: string, no: string) => (language === 'no' ? no : en);
+  const palette = useProgressPalette();
+  const { loading, data, metrics, todayKey, reload } = useStudyData();
+  const topicNotes = useTopicNotes(topicId);
+  const [materialVisible, setMaterialVisible] = useState(false);
 
-  const loadData = useCallback(async () => {
-    try {
-      const [subjects, topicsBySubject, exams, cards, activities, quizResults, reviews] = await Promise.all([
-        getSubjects(), getTopicsBySubject(), getExamsBySubject(), getFlashcards(), getStudyActivity(), getQuizResults(), getFlashcardReviews(),
-      ]);
-      setData({ subjects, topicsBySubject, exams, cards, activities, quizResults, reviews });
-    } catch (error) {
-      console.warn('Could not load topic overview:', error);
-    } finally {
-      setLoading(false);
-    }
-  }, []);
+  const topic = metrics?.topics.find((item) => String(item.id) === topicId && (!param(params.subjectId) || item.subjectId === param(params.subjectId)))
+    ?? metrics?.topics.find((item) => String(item.id) === topicId);
+  const topicName = topic?.name ?? (param(params.name) || L('Topic', 'Tema'));
+  const subjectId = topic?.subjectId ?? param(params.subjectId);
+  const subjectName = topic?.subjectName ?? '';
+  const routeParams = { id: topicId, name: topicName, subjectId };
 
-  useFocusEffect(useCallback(() => {
-    setLoading(true);
-    void loadData();
-    const unsubscribe = subscribeToLocalDataChanges(() => { void loadData(); });
-    const appState = AppState.addEventListener('change', (state) => { if (state === 'active') void loadData(); });
-    return () => { unsubscribe(); appState.remove(); };
-  }, [loadData]));
+  const open = (pathname: string) => () => router.push({ pathname, params: routeParams } as Href);
+  const openFlashcards = open('/subject/topic/flashcards');
+  const openRecall = open('/subject/topic/study/active-recall');
+  const openQuiz = open('/subject/topic/study/quiz');
+  const openReview = open('/subject/topic/study/review');
+  const openProgress = open('/subject/topic/progress');
+  const openFocus = () => router.push({ pathname: '/focus', params: { ...routeParams, subjectName } } as Href);
 
-  const dashboard = useMemo(() => buildProgressDashboard({
-    subjects: data.subjects, topicsBySubject: data.topicsBySubject, examsBySubject: data.exams,
-    activities: data.activities, quizResults: data.quizResults, flashcardReviews: data.reviews,
-  }), [data]);
-  const dueCards = useMemo(() => getDueFlashcards(data.cards.filter((card) => String(card.topicId) === id)), [data.cards, id, todayKey]);
-  const topicStat: DashboardTopic | undefined = dashboard.topics.find((topic) => String(topic.id) === id);
-  const subject = data.subjects.find((item) => String(item.id) === (topicStat?.subjectId || subjectIdParam));
-  const topic: Topic | undefined = subject ? (data.topicsBySubject[String(subject.id)] ?? []).find((item) => String(item.id) === id) : undefined;
-  const topicName = topic?.name ?? nameParam;
-  const activityCount = data.activities.filter((activity) => String(activity.topicId) === id).length;
-  const topicExam = subject ? data.exams[String(subject.id)] : null;
-  const examIncludesTopic = Boolean(topicExam?.topicIds?.map(String).includes(id));
-  const examDays = topicExam && examIncludesTopic ? Math.ceil((new Date(`${topicExam.date}T00:00:00`).getTime() - new Date(`${todayKey}T00:00:00`).getTime()) / 86_400_000) : null;
-  const answered = (topicStat?.quizQuestions ?? 0) + (topicStat?.activeRecallQuestions ?? 0);
-
-  const routeParams = { id, name: topicName, subjectId: subject ? String(subject.id) : subjectIdParam };
-  const openStudy = () => router.push({ pathname: '/subject/topic/study', params: routeParams });
-  const openFlashcards = () => router.push({ pathname: '/subject/topic/flashcards', params: routeParams });
-  const openProgress = () => router.push({ pathname: '/subject/topic/progress', params: routeParams });
-  const startReview = () => router.push({ pathname: '/subject/topic/study/review', params: routeParams });
-
-  function overviewCard(icon: 'brain' | 'cards' | 'chart' | 'calendar', title: string, value: string, detail: string) {
-    return <View style={styles.metricCard} key={title}><View style={styles.metricIcon}><StudyIcon name={icon} size={18} /></View><View style={styles.grow}><Text style={styles.metricTitle}>{title}</Text><Text style={styles.metricValue}>{value}</Text><Text style={styles.metricDetail}>{detail}</Text></View></View>;
+  function openMenu() {
+    Alert.alert(topicName, undefined, [
+      { text: L('Detailed progress and AI review', 'Detaljert fremgang og AI-vurdering'), onPress: openProgress },
+      { text: L('Focus timer', 'Fokustimer'), onPress: openFocus },
+      { text: L('Cancel', 'Avbryt'), style: 'cancel' },
+    ]);
   }
 
-  function actionCard(icon: 'brain' | 'cards' | 'chart', title: string, description: string, onPress: () => void, trailing?: string) {
-    return <Pressable accessibilityRole="button" key={title} style={({ pressed }) => [styles.actionCard, pressed && styles.pressed]} onPress={onPress}>
-      <View style={styles.actionIcon}><StudyIcon name={icon} size={22} /></View>
-      <View style={styles.grow}><View style={styles.actionTitleRow}><Text style={styles.actionTitle}>{title}</Text>{trailing ? <Text style={styles.trailing}>{trailing}</Text> : null}</View><Text style={styles.actionDescription}>{description}</Text></View>
-      <Text style={styles.arrow}>›</Text>
-    </Pressable>;
+  function relativeTime(value: string) {
+    const then = new Date(value).getTime();
+    if (!Number.isFinite(then)) return '';
+    const minutes = Math.max(0, Math.round((Date.now() - then) / 60_000));
+    if (minutes < 1) return L('now', 'nå');
+    if (minutes < 60) return L(`${minutes}m ago`, `${minutes} min siden`);
+    const hours = Math.round(minutes / 60);
+    if (hours < 24) return L(`${hours}h ago`, `${hours} t siden`);
+    const days = Math.round(hours / 24);
+    return L(`${days}d ago`, `${days} d siden`);
+  }
+
+  function describe(activity: StudyActivity) {
+    const count = Math.max(0, activity.questionCount || 0);
+    switch (activity.activity) {
+      case 'quiz': {
+        const score = count > 0 && activity.correctCount !== undefined ? ` · ${Math.round((activity.correctCount / count) * 100)}%` : '';
+        return { title: 'Quiz', detail: `${count} ${L('questions', 'spørsmål')}${score}` };
+      }
+      case 'active_recall': return { title: L('Active recall', 'Aktiv gjenhenting'), detail: `${count} ${L('questions practised', 'spørsmål øvd på')}` };
+      case 'review': return { title: L('Review', 'Repetisjon'), detail: `${count} ${L('cards reviewed', 'kort repetert')}` };
+      case 'flashcards': return { title: 'Flashcards', detail: `${count} ${L('cards studied', 'kort gjennomgått')}` };
+      default: return { title: L('Focus timer', 'Fokustimer'), detail: formatStudyTime(Math.round((activity.durationSeconds || 0) / 60), language) };
+    }
+  }
+
+  let body;
+  if (!data || !metrics) {
+    body = <View style={styles.state}>{loading ? <ActivityIndicator color={palette.accent} /> : <Text style={p.body}>{L('This topic could not be loaded. Pull down to try again.', 'Temaet kunne ikke lastes inn. Dra ned for å prøve igjen.')}</Text>}</View>;
+  } else if (!topic) {
+    body = <View style={[p.card, p.empty]}><Text style={p.emptyTitle}>{L('This topic no longer exists', 'Dette temaet finnes ikke lenger')}</Text></View>;
+  } else {
+    const activities = data.activities.filter((activity) => String(activity.topicId) === topicId)
+      .sort((a, b) => new Date(b.completedAt).getTime() - new Date(a.completedAt).getTime());
+    const studyMinutes = Math.round(activities.reduce((total, activity) => total + Math.max(0, activity.durationSeconds || 0), 0) / 60);
+    const quizAttempts = data.quizResults.filter((result) => String(result.topicId) === topicId).length;
+    const cards = data.cards.filter((card) => String(card.topicId) === topicId);
+    const now = Date.now();
+    const dueCards = cards.filter((card) => !card.nextReviewAt || new Date(card.nextReviewAt).getTime() <= now).length;
+    const recallQuestions = data.recallQuestions[topicId] ?? [];
+    const mastery = calculateTopicMastery({ ...topic, daysSinceLastStudy: topic.daysSinceStudy });
+
+    const exam = data.exams[subjectId];
+    const inExam = Boolean(exam?.topicIds?.map(String).includes(topicId));
+    const examDays = exam && inExam ? getDaysUntil(exam.date, todayKey) : -1;
+
+    // The one thing most worth doing next on this topic.
+    const next: { title: string; detail: string; onPress: () => void } =
+      dueCards > 0 ? { title: L('Review due flashcards', 'Repeter flashcards som har forfalt'), detail: L(`${dueCards} cards are ready for review.`, `${dueCards} kort er klare for repetisjon.`), onPress: openReview }
+      : topic.fadedPoints > 0 ? { title: L('Revise this topic', 'Repeter dette temaet'), detail: L(`Not studied for ${topic.daysSinceStudy} days. A quiz brings the progress back.`, `Ikke studert på ${topic.daysSinceStudy} dager. En quiz henter fremgangen tilbake.`), onPress: openQuiz }
+      : mastery.parts.recall === 0 ? { title: L('Start with active recall', 'Start med aktiv gjenhenting'), detail: L('Retrieve what you know before testing yourself.', 'Hent frem det du kan før du tester deg selv.'), onPress: openRecall }
+      : topic.quizAccuracy === null ? { title: L('Take your first quiz', 'Ta din første quiz'), detail: L('See how much of the topic you know.', 'Se hvor mye av temaet du kan.'), onPress: openQuiz }
+      : cards.length === 0 ? { title: L('Create flashcards', 'Lag flashcards'), detail: L('Cards make the facts stick over time.', 'Kort får fakta til å sitte over tid.'), onPress: openFlashcards }
+      : topic.quizAccuracy < 70 ? { title: L('Quiz your weak areas', 'Ta quiz på det du er svak på'), detail: L(`Your quiz accuracy is ${topic.quizAccuracy}%.`, `Quiz-treffprosenten din er ${topic.quizAccuracy}%.`), onPress: openQuiz }
+      : { title: L('Keep practising', 'Fortsett å øve'), detail: L('Another quiz keeps this topic strong.', 'En ny quiz holder temaet ved like.'), onPress: openQuiz };
+
+    const parts: { key: string; label: string; value: number }[] = [
+      { key: 'quiz', label: 'Quiz', value: mastery.parts.quiz },
+      { key: 'recall', label: L('Active recall', 'Aktiv gjenhenting'), value: mastery.parts.recall },
+      { key: 'cards', label: 'Flashcards', value: mastery.parts.cards },
+      { key: 'days', label: L('Study days', 'Studiedager'), value: mastery.parts.days },
+    ];
+
+    body = (
+      <>
+        <Hero icon={topic.status === 'completed' ? 'check' : 'book'} title={topicName} detail={subjectName} />
+
+        {inExam && examDays >= 0 ? (
+          <View style={[p.inset, p.row]}>
+            <StudyIcon name="calendar" size={18} color={palette.accent} />
+            <Text style={[p.body, p.grow]}>{examDays === 0 ? L('In the exam today', 'Med i eksamen i dag') : L(`In the exam in ${examDays} days`, `Med i eksamen om ${examDays} dager`)}{exam?.type ? ` · ${exam.type}` : ''}</Text>
+          </View>
+        ) : null}
+
+        <View style={p.card}>
+          <View style={p.cardHeader}>
+            <Text style={p.cardTitle}>{L('Topic progress', 'Fremgang i temaet')}</Text>
+            <Text style={styles.percent}>{topic.practiceProgress}%</Text>
+          </View>
+          <ProgressBar value={topic.practiceProgress} color={palette.accent} trackColor={palette.track} height={9} />
+          {topic.fadedPoints > 0 ? <Text style={styles.fading}>{L(`Down ${topic.fadedPoints} points: not studied for ${topic.daysSinceStudy} days.`, `Ned ${topic.fadedPoints} poeng: ikke studert på ${topic.daysSinceStudy} dager.`)}</Text> : null}
+          <View style={styles.stats}>
+            <View style={styles.stat}><Text style={styles.statValue}>{topic.flashcardsReviewed}</Text><Text style={styles.statLabel}>{L('Cards reviewed', 'Kort repetert')}</Text></View>
+            <View style={styles.statDivider} />
+            <View style={styles.stat}><Text style={styles.statValue}>{quizAttempts}</Text><Text style={styles.statLabel}>{L('Quiz attempts', 'Quizforsøk')}</Text></View>
+            <View style={styles.statDivider} />
+            <View style={styles.stat}><Text style={styles.statValue}>{formatStudyTime(studyMinutes, language)}</Text><Text style={styles.statLabel}>{L('Study time', 'Studietid')}</Text></View>
+          </View>
+          <Pressable accessibilityRole="button" onPress={next.onPress} style={({ pressed }) => [p.button, styles.continue, { backgroundColor: palette.accent }, pressed && p.pressed]}>
+            <StudyIcon name="play" size={15} color="#FFFFFF" />
+            <Text style={p.buttonText}>{activities.length ? L('Continue learning', 'Fortsett å lære') : L('Start learning', 'Begynn å lære')}</Text>
+          </Pressable>
+        </View>
+
+        <Pressable accessibilityRole="button" onPress={() => { void topicNotes.load(); setMaterialVisible(true); }} style={({ pressed }) => [p.card, p.row, pressed && p.pressed]}>
+          <IconChip name="note" />
+          <View style={p.grow}>
+            <Text style={styles.activityTitle}>{L('Course material', 'Pensum')}</Text>
+            <Text style={p.small}>{topicNotes.savedLength
+              ? L('Saved. AI uses it for flashcards, quizzes and Active Recall in this topic.', 'Lagret. AI bruker det til flashcards, quiz og Active Recall i dette temaet.')
+              : L('Add notes or a PDF, and AI makes everything in this topic from your course.', 'Legg til notater eller en PDF, så lager AI alt i dette temaet ut fra pensumet ditt.')}</Text>
+          </View>
+          <StudyIcon name={topicNotes.savedLength ? 'check' : 'plus'} size={15} color={ink.muted} />
+        </Pressable>
+
+        <SectionHeader title={L('Study methods', 'Studiemetoder')} />
+        <View style={studyStyles.tiles}>
+          <MethodTile icon="cards" title="Flashcards" detail={cards.length ? `${cards.length} ${L('cards', 'kort')} · ${dueCards} ${L('due', 'forfalt')}` : L('Create or generate cards', 'Lag eller generer kort')} onPress={openFlashcards} />
+          <MethodTile icon="brain" title={L('Active recall', 'Aktiv gjenhenting')} detail={recallQuestions.length ? `${recallQuestions.length} ${L('questions', 'spørsmål')}` : L('Practise questions', 'Øv på spørsmål')} onPress={openRecall} />
+          <MethodTile icon="quiz" title="Quiz" detail={topic.quizAccuracy === null ? L('Test your knowledge', 'Test kunnskapen din') : `${topic.quizAccuracy}% ${L('correct', 'riktig')}`} onPress={openQuiz} />
+          <MethodTile icon="review" title={L('Review', 'Repetisjon')} detail={dueCards ? `${dueCards} ${L('cards due', 'kort forfalt')}` : L('Nothing due now', 'Ingenting forfalt nå')} onPress={openReview} />
+        </View>
+
+        <View style={p.card}>
+          <Text style={p.cardTitle}>{L('What builds your progress', 'Hva som bygger fremgangen')}</Text>
+          {parts.map((part) => (
+            <View key={part.key} style={styles.part}>
+              <Text style={styles.partLabel} numberOfLines={1}>{part.label}</Text>
+              <View style={p.grow}><ProgressBar value={part.value} color={palette.accent} trackColor={palette.track} height={7} /></View>
+              <Text style={styles.partValue}>{part.value}%</Text>
+            </View>
+          ))}
+          <Text style={p.small}>{L(`Each part fills as you practise more and get more right. The topic is completed at ${MASTERED_AT}%.`, `Hver del fylles når du øver mer og får mer riktig. Temaet er fullført ved ${MASTERED_AT} %.`)}</Text>
+        </View>
+
+        <SectionHeader title={L('Recent activity', 'Siste aktivitet')} action={activities.length > 4 ? L('See all', 'Se alle') : undefined} onAction={openProgress} />
+        {activities.length === 0 ? (
+          <View style={[p.card, p.empty]}><Text style={[p.body, studyStyles.centered]}>{L('Your sessions on this topic will show here.', 'Øktene dine i dette temaet vises her.')}</Text></View>
+        ) : (
+          <View style={[p.card, styles.activityCard]}>
+            {activities.slice(0, 4).map((activity, index) => {
+              const text = describe(activity);
+              return (
+                <View key={`${activity.id}-${activity.completedAt}`} style={[styles.activity, index > 0 && styles.activityDivider]}>
+                  <StudyIcon name={ACTIVITY_ICON[activity.activity] ?? 'book'} size={19} color={iconTint(ACTIVITY_ICON[activity.activity] ?? 'book', palette)} />
+                  <View style={p.grow}>
+                    <Text style={styles.activityTitle}>{text.title}</Text>
+                    <Text style={p.small}>{text.detail}</Text>
+                  </View>
+                  <Text style={p.small}>{relativeTime(activity.completedAt)}</Text>
+                </View>
+              );
+            })}
+          </View>
+        )}
+
+        <Pressable accessibilityRole="button" onPress={next.onPress} style={({ pressed }) => [p.card, p.row, pressed && p.pressed]}>
+          <IconChip name="sparkles" />
+          <View style={p.grow}>
+            <Text style={styles.eyebrow}>{L('Suggested next step', 'Foreslått neste steg')}</Text>
+            <Text style={styles.activityTitle}>{next.title}</Text>
+            <Text style={p.small}>{next.detail}</Text>
+          </View>
+          <StudyIcon name="chevron" size={12} color={ink.muted} />
+        </Pressable>
+
+        <View style={[p.card, p.row]}>
+          <View style={p.grow}>
+            <Text style={styles.activityTitle}>{L('AI review of this topic', 'AI-vurdering av temaet')}</Text>
+            <Text style={p.small}>{L('Quiz history, missed questions and a written review.', 'Quizhistorikk, bommede spørsmål og en skriftlig vurdering.')}</Text>
+          </View>
+          <PillButton label={L('Open', 'Åpne')} onPress={openProgress} />
+        </View>
+      </>
+    );
   }
 
   return (
-    <SafeAreaView style={styles.container} edges={['top']}>
+    <SafeAreaView style={ui.container} edges={['top']}>
       <Stack.Screen options={{ headerShown: false }} />
-      <PullToRefreshScrollView contentContainerStyle={styles.content} showsVerticalScrollIndicator={false} onRefresh={loadData}>
-        <Pressable style={styles.backButton} onPress={() => router.back()}><Text style={styles.backText}>‹  Study</Text></Pressable>
-        <Text style={styles.title}>{topicName}</Text>
-        <Text style={styles.subtitle}>{subject?.name ?? 'Subject'} · Manage everything for this topic.</Text>
-
-        {loading ? <View style={styles.loading}><ActivityIndicator color={appColor('#328FB5', 'text')} /><Text style={styles.bodyText}>Updating this topic…</Text></View> : <>
-          {examIncludesTopic && examDays !== null && examDays >= 0 ? <View style={styles.examCard}><View style={styles.examIcon}><StudyIcon name="calendar" size={18} /></View><View style={styles.grow}><Text style={styles.examTitle}>Included in {subject?.name} exam</Text><Text style={styles.examText}>{examDays === 0 ? 'Exam today' : `${examDays} days remaining`} · {topicExam?.type}</Text></View></View> : null}
-
-          <View style={styles.overview}>
-            <View style={styles.overviewHeader}><View><Text style={styles.sectionTitle}>Progress overview</Text><Text style={styles.bodyText}>Based on recorded study activity</Text></View><Text style={styles.overallPercent}>{topicStat?.practiceProgress ?? 0}%</Text></View>
-            <View style={styles.progressTrack}><View style={[styles.progressFill, { width: `${topicStat?.practiceProgress ?? 0}%` }]} /></View>
-            <Text style={styles.progressNote}>Practice progress combines your recorded study methods and quiz results. It is a progress indicator, not a claim of mastery.</Text>
-            <View style={styles.metricsGrid}>
-              {overviewCard('brain', 'Questions answered', String(answered), `${topicStat?.activeRecallQuestions ?? 0} Active Recall · ${topicStat?.quizQuestions ?? 0} quiz`)}
-              {overviewCard('chart', 'Quiz accuracy', topicStat?.quizAccuracy === null || topicStat?.quizAccuracy === undefined ? '—' : `${topicStat.quizAccuracy}%`, topicStat?.quizQuestions ? `${topicStat.quizCorrect} correct of ${topicStat.quizQuestions}` : 'Take a quiz to record accuracy')}
-              {overviewCard('cards', 'Flashcards due', String(dueCards.length), `${data.cards.filter((card) => String(card.topicId) === id).length} saved for this topic`)}
-              {overviewCard('calendar', 'Study sessions', String(activityCount), `Last studied ${formatLastStudied(topicStat?.lastStudiedAt ?? null)}`)}
-            </View>
-          </View>
-
-          <Text style={styles.sectionHeading}>Study this topic</Text>
-          {actionCard('brain', 'Study', 'Practise with Active Recall or take a quiz.', openStudy)}
-          {actionCard('cards', 'Flashcards', dueCards.length ? `${dueCards.length} ready for spaced review.` : 'Create, edit and review your cards.', openFlashcards, dueCards.length ? `${dueCards.length} due` : undefined)}
-          {dueCards.length ? <Pressable style={styles.reviewButton} onPress={startReview}><StudyIcon name="review" size={18} color="#FFFFFF" /><Text style={styles.reviewButtonText}>Review due cards</Text></Pressable> : null}
-          {actionCard('chart', 'Topic progress', 'Review quiz results, study history and areas to practise.', openProgress)}
-        </>}
+      <PullToRefreshScrollView contentContainerStyle={studyStyles.content} showsVerticalScrollIndicator={false} onRefresh={reload}>
+        <ScreenBar backLabel={L('Back', 'Tilbake')} onMenu={openMenu} menuLabel={L('More options', 'Flere valg')} />
+        {body}
       </PullToRefreshScrollView>
+      <TopicMaterialSheet visible={materialVisible} onClose={() => setMaterialVisible(false)} state={topicNotes} topicName={topicName} />
     </SafeAreaView>
   );
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: appColor('#F7FBFE', 'background'), paddingHorizontal: 20 },
-  content: { paddingBottom: 38, gap: 14 },
-  backButton: { alignSelf: 'flex-start', marginTop: 8, paddingVertical: 5 },
-  backText: { color: appColor('#3B85A1', 'text'), fontSize: 14, fontWeight: '700' },
-  title: { color: appColor('#17324D', 'text'), fontSize: 31, fontWeight: '800', marginTop: 4 },
-  subtitle: { color: appColor('#738795', 'text'), fontSize: 13, lineHeight: 19, marginTop: -8 },
-  grow: { flex: 1 },
-  examCard: { flexDirection: 'row', gap: 10, alignItems: 'center', padding: 13, backgroundColor: appColor('#EDF7FA', 'background'), borderRadius: 16, borderWidth: 1, borderColor: appColor('#DAEDF3', 'border') },
-  examIcon: { width: 36, height: 36, alignItems: 'center', justifyContent: 'center', borderRadius: 12, backgroundColor: appColor('#FFFFFF', 'background') },
-  examTitle: { color: appColor('#294D60', 'text'), fontSize: 12, fontWeight: '800' },
-  examText: { color: appColor('#648293', 'text'), fontSize: 11, marginTop: 3 },
-  overview: { gap: 11, padding: 15, borderRadius: 19, backgroundColor: appColor('#FFFFFF', 'background'), borderWidth: 1, borderColor: appColor('#E6EDF1', 'border') },
-  overviewHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
-  sectionTitle: { color: appColor('#17324D', 'text'), fontSize: 16, fontWeight: '800' },
-  bodyText: { color: appColor('#7A8D99', 'text'), fontSize: 11, marginTop: 3 },
-  overallPercent: { color: appColor('#317F9D', 'text'), fontSize: 24, fontWeight: '800' },
-  progressTrack: { height: 8, borderRadius: 8, overflow: 'hidden', backgroundColor: appColor('#E6EEF2', 'background') },
-  progressFill: { height: '100%', borderRadius: 8, backgroundColor: '#45A1C3' },
-  progressNote: { color: appColor('#83949E', 'text'), fontSize: 10, lineHeight: 15 },
-  metricsGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginTop: 2 },
-  metricCard: { flexDirection: 'row', alignItems: 'flex-start', gap: 8, width: '48%', flexGrow: 1, padding: 10, borderRadius: 13, backgroundColor: appColor('#F5F9FB', 'background') },
-  metricIcon: { width: 29, height: 29, alignItems: 'center', justifyContent: 'center', borderRadius: 9, backgroundColor: appColor('#FFFFFF', 'background') },
-  metricTitle: { color: appColor('#778B98', 'text'), fontSize: 9, fontWeight: '800' },
-  metricValue: { color: appColor('#17324D', 'text'), fontSize: 17, fontWeight: '800', marginTop: 2 },
-  metricDetail: { color: appColor('#81929D', 'text'), fontSize: 9, lineHeight: 13, marginTop: 2 },
-  sectionHeading: { color: appColor('#17324D', 'text'), fontSize: 17, fontWeight: '800', marginTop: 5 },
-  actionCard: { flexDirection: 'row', alignItems: 'center', gap: 12, padding: 14, backgroundColor: appColor('#FFFFFF', 'background'), borderRadius: 17, borderWidth: 1, borderColor: appColor('#E6EDF1', 'border') },
-  actionIcon: { width: 44, height: 44, alignItems: 'center', justifyContent: 'center', borderRadius: 14, backgroundColor: appColor('#EAF5F9', 'background') },
-  actionTitleRow: { flexDirection: 'row', alignItems: 'center', gap: 7 },
-  actionTitle: { color: appColor('#17324D', 'text'), fontSize: 14, fontWeight: '800' },
-  actionDescription: { color: appColor('#788B98', 'text'), fontSize: 11, lineHeight: 16, marginTop: 3 },
-  trailing: { color: appColor('#347E9B', 'text'), fontSize: 9, fontWeight: '800', backgroundColor: appColor('#E8F5FA', 'background'), paddingHorizontal: 6, paddingVertical: 3, borderRadius: 7 },
-  arrow: { color: appColor('#9AB5C4', 'text'), fontSize: 24, fontWeight: '300' },
-  reviewButton: { flexDirection: 'row', minHeight: 44, alignItems: 'center', justifyContent: 'center', gap: 8, borderRadius: 13, backgroundColor: '#328FB5', marginTop: -6 },
-  reviewButtonText: { color: '#FFFFFF', fontSize: 13, fontWeight: '800' },
-  loading: { alignItems: 'center', padding: 36, gap: 10 },
-  pressed: { opacity: 0.82, transform: [{ scale: 0.99 }] },
+  state: { alignItems: 'center', paddingVertical: 60 },
+  percent: { color: ink.primary, fontSize: 20, fontWeight: '800' },
+  fading: { color: appColor('#9A6530', 'text'), fontSize: 12, fontWeight: '600', marginTop: -6 },
+  stats: { flexDirection: 'row', alignItems: 'stretch' },
+  stat: { flex: 1, alignItems: 'center', gap: 3, paddingHorizontal: 4 },
+  statDivider: { width: StyleSheet.hairlineWidth, backgroundColor: appColor('#D8E6EC', 'border') },
+  statValue: { color: ink.primary, fontSize: 18, fontWeight: '800' },
+  statLabel: { color: ink.muted, fontSize: 11, textAlign: 'center' },
+  continue: { flexDirection: 'row', gap: 8, minHeight: 52, borderRadius: 16 },
+  part: { flexDirection: 'row', alignItems: 'center', gap: 10 },
+  partLabel: { width: '34%', color: ink.secondary, fontSize: 12 },
+  partValue: { width: 38, color: ink.primary, fontSize: 12, fontWeight: '700', textAlign: 'right' },
+  activityCard: { gap: 0, paddingVertical: 6 },
+  activity: { flexDirection: 'row', alignItems: 'center', gap: 12, paddingVertical: 11 },
+  activityDivider: { borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: appColor('#D8E6EC', 'border') },
+  activityTitle: { color: ink.primary, fontSize: 14, fontWeight: '700' },
+  eyebrow: { color: ink.muted, fontSize: 10, fontWeight: '800', letterSpacing: 0.8, textTransform: 'uppercase', marginBottom: 2 },
 });

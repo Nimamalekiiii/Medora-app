@@ -1,3 +1,4 @@
+import { BackLink } from '@/components/back-link';
 import { LocalizedText as Text } from '@/components/localized-text';
 import PullToRefreshScrollView from '@/components/pull-to-refresh-scroll-view';
 import { StudyIcon } from '@/components/study-icon';
@@ -15,7 +16,7 @@ export default function StudyScreen() {
     <SafeAreaView style={styles.container} edges={['top']}>
       <Stack.Screen options={{ headerShown: false }} />
       <PullToRefreshScrollView contentContainerStyle={styles.content} showsVerticalScrollIndicator={false}>
-        <Pressable style={styles.backButton} onPress={() => router.back()}><Text style={styles.backText}>‹  {topicName}</Text></Pressable>
+        <BackLink label={topicName} />
         <Text style={styles.title}>Study</Text>
         <Text style={styles.topicName}>{topicName}</Text>
         <Text style={styles.subtitle}>Choose how you want to practise this topic.</Text>
@@ -23,13 +24,13 @@ export default function StudyScreen() {
         <Pressable accessibilityRole="button" style={({ pressed }) => [styles.card, pressed && styles.pressed]} onPress={() => router.push({ pathname: '/subject/topic/study/active-recall', params: routeParams })}>
           <View style={styles.iconBox}><StudyIcon name="brain" size={24} /></View>
           <View style={styles.cardContent}><Text style={styles.cardTitle}>Active Recall</Text><Text style={styles.cardText}>Retrieve what you know, then rate how well you remembered it.</Text></View>
-          <Text style={styles.arrow}>›</Text>
+          <StudyIcon name="chevron" size={13} color={appColor('#9AADB8', 'text')} />
         </Pressable>
 
         <Pressable accessibilityRole="button" style={({ pressed }) => [styles.card, pressed && styles.pressed]} onPress={() => router.push({ pathname: '/subject/topic/study/quiz', params: routeParams })}>
           <View style={styles.iconBox}><StudyIcon name="quiz" size={24} /></View>
           <View style={styles.cardContent}><Text style={styles.cardTitle}>Quiz</Text><Text style={styles.cardText}>Test your knowledge and get explanations for every answer.</Text></View>
-          <Text style={styles.arrow}>›</Text>
+          <StudyIcon name="chevron" size={13} color={appColor('#9AADB8', 'text')} />
         </Pressable>
 
         <View style={styles.infoCard}><View style={styles.infoIcon}><StudyIcon name="layers" size={18} /></View><View style={styles.cardContent}><Text style={styles.infoTitle}>Study tools for {topicName}</Text><Text style={styles.infoText}>Flashcards and scheduled review are available on the topic page. Your sessions update this topic’s progress and the overall Progress dashboard.</Text></View></View>

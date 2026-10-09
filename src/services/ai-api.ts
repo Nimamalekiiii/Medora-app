@@ -1,7 +1,7 @@
 import type { QuizQuestion } from '../types/study';
 import Constants from 'expo-constants';
-import type { AIDifficulty, AIExplanationStyle } from './storage';
-import { getSupabaseClient } from './supabase';
+import { getAppPreferences, type AIDifficulty, type AIExplanationStyle } from './storage';
+import { getSupabaseClient, readSavedSession } from './supabase';
 
 export type AIStudyAnalysis = {
   topicId: string;
@@ -96,25 +96,36 @@ const API_URL = (configuredUrl || (__DEV__ && metroHost ? `http://${metroHost}:3
 
 function getApiUrl() {
   if (!API_URL) {
-    throw new Error('MedExam AI is not connected yet. Set EXPO_PUBLIC_MEDEXAM_API_URL to the secure AI server address and rebuild the app.');
+    throw new Error('Medora AI is not connected yet. Set EXPO_PUBLIC_MEDEXAM_API_URL to the secure AI server address and rebuild the app.');
   }
   return API_URL;
 }
 
-async function post<T>(path: string, body: unknown): Promise<T> {
+async function post<T>(path: string, body: unknown, timeoutMs = 60_000): Promise<T> {
   const supabase = getSupabaseClient();
-  if (!supabase) throw new Error('Sign in to MedExam before using AI study tools.');
+  if (!supabase) throw new Error('Sign in to Medora before using AI study tools.');
   const { data: { session }, error: sessionError } = await supabase.auth.getSession();
   if (sessionError) throw new Error('Your sign-in could not be checked. Please sign in again.');
-  if (!session?.access_token) throw new Error('Sign in to MedExam before using AI study tools.');
+  if (!session?.access_token) {
+    // Signed in on this device, but the sign-in could not be refreshed: a connection problem, not a missing account.
+    if (await readSavedSession()) throw new Error('Could not reach Medora. Check your connection and try again.');
+    throw new Error('Sign in to Medora before using AI study tools.');
+  }
+
+  // Every request says which language the app is in, so the AI answers in it.
+  let payload = body;
+  if (body && typeof body === 'object' && !Array.isArray(body) && !('language' in body)) {
+    const language = await getAppPreferences().then((preferences) => preferences.language).catch(() => 'en' as const);
+    payload = { ...body, language };
+  }
 
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 60_000);
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
   try {
     const response = await fetch(`${getApiUrl()}${path}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${session.access_token}` },
-      body: JSON.stringify(body),
+      body: JSON.stringify(payload),
       signal: controller.signal,
     });
     const data = await response.json().catch(() => null);
@@ -127,7 +138,7 @@ async function post<T>(path: string, body: unknown): Promise<T> {
       throw new Error('This is taking too long. Check the connection and try again.');
     }
     if (error instanceof TypeError) {
-      throw new Error('Could not reach the MedExam AI server. Check its address and connection.');
+      throw new Error('Could not reach the Medora AI server. Check its address and connection.');
     }
     throw error;
   } finally {
@@ -141,7 +152,7 @@ export async function getAIStudyAnalysis(studyData: unknown): Promise<AIStudyAna
   if (!analysis || typeof analysis.topicId !== 'string' || typeof analysis.subjectId !== 'string' ||
     typeof analysis.topicName !== 'string' || typeof analysis.subjectName !== 'string' ||
     !['low', 'medium', 'high'].includes(analysis.priority) || typeof analysis.reason !== 'string' ||
-    !analysis.reason.trim() || analysis.reason.length > 300 ||
+    !analysis.reason.trim() || analysis.reason.length > 600 ||
     !Array.isArray(analysis.recommendedActivities) || analysis.recommendedActivities.length === 0 || !analysis.recommendedActivities.every((activity) => ['active_recall', 'quiz', 'review', 'flashcards'].includes(activity)) || !Number.isInteger(analysis.estimatedMinutes) ||
     analysis.estimatedMinutes < 5 || analysis.estimatedMinutes > 180) {
     throw new Error('The AI returned an incomplete study suggestion.');
@@ -296,4 +307,27 @@ export async function generateAIActiveRecall(input: {
   }
   if (questions.length < total) throw new Error(`The AI created ${questions.length} unique questions. Try again or add more course notes.`);
   return questions;
+}
+
+export const MAX_NOTES_PDF_BYTES = 10 * 1024 * 1024;
+
+/** Asks the AI for topics in a subject: its core topics, or the topics found in the student's own notes. */
+export async function suggestAITopics(input: { subjectName: string; existingTopics: string[]; sourceMaterial?: string; count?: number }): Promise<string[]> {
+  const data = await post<{ topics?: unknown }>('/ai/suggest-topics', {
+    subjectName: input.subjectName,
+    existingTopics: input.existingTopics.slice(0, 80),
+    sourceMaterial: input.sourceMaterial,
+    count: input.count ?? 10,
+  }, 90_000);
+  const topics = Array.isArray(data.topics) ? data.topics.filter((item): item is string => typeof item === 'string' && item.trim().length > 0).map((item) => item.trim()) : [];
+  if (topics.length === 0) throw new Error('The AI did not return any topics. Please try again.');
+  return topics;
+}
+
+/** Sends a lecture PDF to the AI server and returns study notes written from it. */
+export async function extractNotesFromPdf(input: { fileName: string; dataBase64: string }): Promise<{ notes: string; truncated: boolean }> {
+  // Reading a whole document takes longer than generating a few questions.
+  const data = await post<{ notes?: string; truncated?: boolean }>('/ai/extract-notes', input, 150_000);
+  if (typeof data.notes !== 'string' || !data.notes.trim()) throw new Error('The AI did not return any notes. Please try again.');
+  return { notes: data.notes.trim(), truncated: data.truncated === true };
 }

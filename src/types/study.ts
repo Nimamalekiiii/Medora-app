@@ -72,6 +72,11 @@ export type ActiveRecallQuestion = {
   hardCount?: number;
   goodCount?: number;
   easyCount?: number;
+  /** Spaced repetition state, see services/spaced-repetition.ts. */
+  intervalDays?: number;
+  easeFactor?: number;
+  repetitions?: number;
+  lapses?: number;
 };
 
 export type ActiveRecallQuestionsByTopic = {
@@ -131,6 +136,12 @@ export type Flashcard = {
   lastReviewedAt?: string;
   nextReviewAt?: string;
   difficulty?: 'easy' | 'medium' | 'hard';
+  createdBy?: 'manual' | 'ai';
+  /** Spaced repetition state, see services/spaced-repetition.ts. */
+  intervalDays?: number;
+  easeFactor?: number;
+  repetitions?: number;
+  lapses?: number;
 };
 
 export type FlashcardReview = {
@@ -198,4 +209,11 @@ export type PreparationAnalysis = {
   weakTopics: string[];
 
   recommendations: StudyRecommendation[];
+};
+
+/** Course material saved on one topic and reused for every AI generation. */
+export type TopicNotes = { text: string; updatedAt: string };
+
+export type TopicNotesByTopic = {
+  [topicId: string]: TopicNotes;
 };

@@ -1,28 +1,50 @@
-import { router } from 'expo-router';
-import { SettingsCard, SettingsPage, SettingsRow, SettingsNote } from './shared';
+import { LocalizedText as Text } from '@/components/localized-text';
+import { SettingsCard, SettingsPage, SettingsRow } from '@/components/settings-shared';
+import { appColor } from '@/constants/adaptive-color';
+import { useAppSettings } from '@/services/app-settings-context';
+import Constants from 'expo-constants';
+import { router, type Href } from 'expo-router';
+import { StyleSheet } from 'react-native';
+
+const APPEARANCE_LABEL = { system: 'Automatic', light: 'Light', dark: 'Dark' } as const;
+const LANGUAGE_LABEL = { en: 'English', no: 'Norsk' } as const;
+
+const open = (path: string) => () => router.push(path as Href);
 
 export default function SettingsHome() {
-  return <SettingsPage title="Settings" description="Personalize how MedExam plans, reminds and supports your study.">
-    <SettingsCard title="Study">
-      <SettingsRow title="Study preferences" description="Days, daily goal, study time and breaks" onPress={() => router.push('/settings/study' as never)} />
-      <SettingsRow title="Study plan" description="Choose what the plan prioritizes" onPress={() => router.push('/settings/planning' as never)} />
+  const { preferences } = useAppSettings();
+
+  return <SettingsPage title="Settings" description="Customize your Medora experience">
+    <SettingsCard icon="book" title="Study">
+      <SettingsRow icon="calendar" title="Study preferences" onPress={open('/settings/study')} />
+      <SettingsRow icon="target" title="Study plan" onPress={open('/settings/planning')} />
     </SettingsCard>
-    <SettingsCard title="Notifications">
-      <SettingsRow title="Reminders" description="Daily study, exam and review reminders" onPress={() => router.push('/settings/notifications' as never)} />
+
+    <SettingsCard icon="bell" title="Notifications">
+      <SettingsRow icon="bell" title="Reminders" onPress={open('/settings/notifications')} />
     </SettingsCard>
-    <SettingsCard title="App">
-      <SettingsRow title="Appearance" description="Light, dark or follow the device" onPress={() => router.push('/settings/appearance' as never)} />
-      <SettingsRow title="Language" description="Choose the app language" onPress={() => router.push('/settings/language' as never)} />
-      <SettingsRow title="AI preferences" description="Quiz and flashcard generation" onPress={() => router.push('/settings/ai' as never)} />
+
+    <SettingsCard icon="settings" title="App">
+      <SettingsRow icon="appearance" title="Appearance" value={APPEARANCE_LABEL[preferences.appearance]} onPress={open('/settings/appearance')} />
+      <SettingsRow icon="globe" title="Language" value={LANGUAGE_LABEL[preferences.language]} onPress={open('/settings/language')} />
+      <SettingsRow icon="sparkles" title="AI preferences" onPress={open('/settings/ai')} />
     </SettingsCard>
-    <SettingsCard title="Your account">
-      <SettingsRow title="Data, sync & security" description="Backups, restore, cloud sync and sign-in" onPress={() => router.push('/settings/data' as never)} />
-      <SettingsRow title="Privacy & data" description="AI use, export and deletion controls" onPress={() => router.push('/settings/privacy' as never)} />
+
+    <SettingsCard icon="person" title="Account">
+      <SettingsRow icon="person" title="Personal information" onPress={open('/account')} />
+      <SettingsRow icon="lock" title="Data, sync and security" onPress={open('/settings/data')} />
+      <SettingsRow icon="shield" title="Privacy and data" onPress={open('/settings/privacy')} />
     </SettingsCard>
-    <SettingsCard title="Support">
-      <SettingsRow title="Help & FAQ" description="Answers and ways to report a problem" onPress={() => router.push('/settings/help' as never)} />
-      <SettingsRow title="About MedExam" description="Version, terms and licenses" onPress={() => router.push('/settings/about' as never)} />
+
+    <SettingsCard icon="help" title="Support">
+      <SettingsRow icon="help" title="Help & FAQ" onPress={open('/settings/help')} />
+      <SettingsRow icon="info" title="About Medora" onPress={open('/settings/about')} />
     </SettingsCard>
-    <SettingsNote>Study settings are saved on this device and included in your MedExam backup and cloud sync.</SettingsNote>
+
+    <Text style={styles.version}>Medora {Constants.expoConfig?.version ?? '1.0.0'}</Text>
   </SettingsPage>;
 }
+
+const styles = StyleSheet.create({
+  version: { color: appColor('#9AAAB4', 'text'), fontSize: 12, textAlign: 'center', marginTop: 6 },
+});

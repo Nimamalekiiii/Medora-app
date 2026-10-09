@@ -1,379 +1,368 @@
-import { LocalizedText as Text } from '@/components/localized-text';
+import { cardShadow } from '@/components/gloss';
+import { IconChip } from '@/components/study/icon-chip';
+import { ProgressBar } from '@/components/charts';
+import { ink, p, useProgressPalette } from '@/components/progress/theme';
+import PullToRefreshScrollView from '@/components/pull-to-refresh-scroll-view';
+import { AddTopicSheet } from '@/components/study/add-topic-sheet';
+import { Chips, PillButton, ScreenBar, SectionHeader, Segments, StudyRow, studyStyles } from '@/components/study/study-ui';
+import { SubjectGlyph, TopicRing } from '@/components/study/subject-glyph';
+import { TopicMaterialSheet, useTopicNotes } from '@/components/study/topic-notes';
+import { StudyIcon } from '@/components/study-icon';
 import { appColor } from '@/constants/adaptive-color';
+import { ui } from '@/constants/ui';
+import { useStudyData } from '@/hooks/use-study-data';
+import { useAppSettings } from '@/services/app-settings-context';
+import type { ProgressTopic, TopicStatus } from '@/services/progress-metrics';
+import { deleteTopicAndData, getTopicNotesByTopic, saveTopicsBySubject } from '@/services/storage';
+import type { TopicNotesByTopic } from '@/types/study';
 import { Stack, router, useFocusEffect, useLocalSearchParams } from 'expo-router';
 import { useCallback, useState } from 'react';
 import {
-  Alert,
-  KeyboardAvoidingView,
-  Modal,
-  Platform,
-  Pressable,
-  ScrollView,
-  StyleSheet,
-  TextInput,
-  View,
+  ActivityIndicator, Alert, KeyboardAvoidingView, Modal, Platform, Pressable, StyleSheet, Text, TextInput, View,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { deleteTopicAndData, getTopicsBySubject, saveTopicsBySubject } from '../../services/storage';
-import type { TopicsBySubject } from '../../types/study';
-import PullToRefreshScrollView from '../../components/pull-to-refresh-scroll-view';
 
-type Topic = {
-  id: number;
-  name: string;
-};
+type Tab = 'topics' | 'flashcards' | 'quizzes' | 'notes';
+type Filter = 'all' | TopicStatus;
+const TABS: Tab[] = ['topics', 'flashcards', 'quizzes', 'notes'];
+const MAX_TOPIC_NAME_LENGTH = 60;
 
-export default function TopicsScreen() {
-  const { id } = useLocalSearchParams();
+const param = (value: string | string[] | undefined) => (Array.isArray(value) ? value[0] ?? '' : value ?? '');
 
-  const subjectId = Array.isArray(id) ? id[0] : id;
+/**
+ * A subject's topics, opened both from the Subjects tab and the Study tab:
+ * the topics with their progress, their flashcards, quizzes and course
+ * material, and adding, renaming and deleting topics.
+ */
+export default function SubjectTopicsScreen() {
+  const params = useLocalSearchParams<{ id?: string | string[]; name?: string | string[]; tab?: string | string[] }>();
+  const subjectId = param(params.id);
+  const initialTab = TABS.includes(param(params.tab) as Tab) ? (param(params.tab) as Tab) : 'topics';
+  const { preferences } = useAppSettings();
+  const language = preferences.language;
+  const L = (en: string, no: string) => (language === 'no' ? no : en);
+  const palette = useProgressPalette();
+  const { loading, data, metrics, reload } = useStudyData();
 
-  const [topicsBySubject, setTopicsBySubject] =
-    useState<TopicsBySubject>({});
+  const [tab, setTab] = useState<Tab>(initialTab);
+  const [filter, setFilter] = useState<Filter>('all');
+  const [weakestFirst, setWeakestFirst] = useState(false);
+  const [addVisible, setAddVisible] = useState(false);
 
-  const [loading, setLoading] = useState(true);
+  // Rename one topic.
+  const [renaming, setRenaming] = useState<ProgressTopic | null>(null);
+  const [renameText, setRenameText] = useState('');
+  const [renameError, setRenameError] = useState('');
+  const [saving, setSaving] = useState(false);
 
-  const [modalVisible, setModalVisible] = useState(false);
-  const [editingTopic, setEditingTopic] = useState<Topic | null>(null);
-  const [topicName, setTopicName] = useState('');
+  // Course material per topic.
+  const [notesByTopic, setNotesByTopic] = useState<TopicNotesByTopic>({});
+  const [materialTopic, setMaterialTopic] = useState<ProgressTopic | null>(null);
+  const materialNotes = useTopicNotes(materialTopic ? String(materialTopic.id) : '');
 
-  const topics = topicsBySubject[subjectId ?? ''] ?? [];
-
-  useFocusEffect(useCallback(() => {
-    let active = true;
-    loadTopics(active);
-    return () => { active = false; };
-  }, [subjectId]));
-
-  const loadTopics = async (active = true) => {
+  const loadNotes = useCallback(async () => {
     try {
-      const saved = await getTopicsBySubject();
-      if (active) setTopicsBySubject(saved);
+      setNotesByTopic(await getTopicNotesByTopic());
     } catch (error) {
-      console.log('Could not load topics:', error);
-    } finally {
-      if (active) setLoading(false);
+      console.warn('Could not load the topic notes:', error);
     }
-  };
+  }, []);
+  useFocusEffect(useCallback(() => { void loadNotes(); }, [loadNotes]));
 
-  // Save topics to storage
-  const saveTopics = async (updatedTopics: TopicsBySubject): Promise<boolean> => {
+  const subjectIndex = data?.subjects.findIndex((item) => String(item.id) === subjectId) ?? -1;
+  const subject = subjectIndex >= 0 ? data?.subjects[subjectIndex] : undefined;
+  const subjectName = subject?.name ?? (param(params.name) || L('Subject', 'Emne'));
+  const routeParams = { id: subjectId, name: subjectName };
+  const savedTopics = data?.topicsBySubject[subjectId] ?? [];
+
+  const topicParams = (topic: ProgressTopic) => ({ id: String(topic.id), name: topic.name, subjectId });
+  const openTopic = (topic: ProgressTopic) => router.push({ pathname: '/subject/topic/[id]', params: { ...topicParams(topic), subjectName } });
+
+  function openMenu() {
+    Alert.alert(subjectName, undefined, [
+      { text: L('Add topic', 'Legg til tema'), onPress: () => setAddVisible(true) },
+      { text: L('Exam', 'Eksamen'), onPress: () => router.push({ pathname: '/subject/exam', params: routeParams }) },
+      { text: L('Study plan', 'Studieplan'), onPress: () => router.push({ pathname: '/subject/study-plan', params: routeParams }) },
+      { text: L('Cancel', 'Avbryt'), style: 'cancel' },
+    ]);
+  }
+
+  async function addTopics(names: string[]) {
+    if (!data || !subjectId) return false;
+    const stamp = Date.now();
+    const additions = names.map((name, index) => ({ id: stamp + index, name: name.trim().slice(0, MAX_TOPIC_NAME_LENGTH) }));
     try {
-      await saveTopicsBySubject(updatedTopics);
-      setTopicsBySubject(updatedTopics);
+      await saveTopicsBySubject({ ...data.topicsBySubject, [subjectId]: [...savedTopics, ...additions] });
+      await reload();
       return true;
     } catch (error) {
-      console.log('Could not save topics:', error);
-      Alert.alert('Could not save', 'Your changes were not saved. Please try again.');
+      console.warn('Could not save topics:', error);
       return false;
     }
-  };
+  }
 
-  // Open add modal
-  const openAddModal = () => {
-    setEditingTopic(null);
-    setTopicName('');
-    setModalVisible(true);
-  };
+  function openRename(topic: ProgressTopic) {
+    setRenaming(topic);
+    setRenameText(topic.name);
+    setRenameError('');
+  }
 
-  // Open edit modal
-  const openEditModal = (topic: Topic) => {
-    setEditingTopic(topic);
-    setTopicName(topic.name);
-    setModalVisible(true);
-  };
-
-  // Add or edit topic
-  const saveTopic = async () => {
-    const trimmedName = topicName.trim();
-
-    if (!trimmedName) {
-      Alert.alert('Missing topic', 'Please enter a topic name.');
+  async function saveRename() {
+    const trimmed = renameText.trim();
+    if (!data || !renaming || !trimmed || saving) return;
+    if (savedTopics.some((topic) => topic.id !== renaming.id && topic.name.trim().toLocaleLowerCase() === trimmed.toLocaleLowerCase())) {
+      setRenameError(L('This subject already has a topic with that name.', 'Emnet har allerede et tema med det navnet.'));
       return;
     }
-
-    if (!subjectId) {
-      return;
+    setSaving(true);
+    try {
+      await saveTopicsBySubject({ ...data.topicsBySubject, [subjectId]: savedTopics.map((topic) => (topic.id === renaming.id ? { ...topic, name: trimmed } : topic)) });
+      await reload();
+      setRenaming(null);
+    } catch (error) {
+      console.warn('Could not rename the topic:', error);
+      setRenameError(L('The name could not be saved. Try again.', 'Navnet kunne ikke lagres. Prøv igjen.'));
+    } finally {
+      setSaving(false);
     }
+  }
 
-    let updatedTopics: TopicsBySubject;
-
-    if (editingTopic) {
-      updatedTopics = {
-        ...topicsBySubject,
-        [subjectId]: topics.map((topic) =>
-          topic.id === editingTopic.id
-            ? {
-                ...topic,
-                name: trimmedName,
-              }
-            : topic
-        ),
-      };
-    } else {
-      const newTopic: Topic = {
-        id: Date.now(),
-        name: trimmedName,
-      };
-
-      updatedTopics = {
-        ...topicsBySubject,
-        [subjectId]: [...topics, newTopic],
-      };
-    }
-
-    if (!await saveTopics(updatedTopics)) return;
-
-    setModalVisible(false);
-    setTopicName('');
-    setEditingTopic(null);
-  };
-
-  // Delete topic
-  const deleteTopic = (topic: Topic) => {
-    if (!subjectId) {
-      return;
-    }
-
+  function confirmDelete(topic: ProgressTopic) {
     Alert.alert(
-      'Delete topic?',
-      `This also removes its saved questions, quizzes, flashcards and progress. A recovery copy will be available from Profile.`,
+      L('Delete topic?', 'Slette temaet?'),
+      L(
+        `This removes ${topic.name} with its questions, quizzes, flashcards, course material and progress. A recovery copy is kept under Profile.`,
+        `Dette fjerner ${topic.name} med spørsmål, quizer, flashcards, pensum og fremgang. En gjenopprettingskopi ligger under Profil.`,
+      ),
       [
+        { text: L('Cancel', 'Avbryt'), style: 'cancel' },
         {
-          text: 'Cancel',
-          style: 'cancel',
-        },
-        {
-          text: 'Delete',
+          text: L('Delete', 'Slett'),
           style: 'destructive',
           onPress: async () => {
             try {
               await deleteTopicAndData(subjectId, topic.id);
-              await loadTopics();
+              await Promise.all([reload(), loadNotes()]);
             } catch (error) {
-              console.error('Could not delete topic data:', error);
-              Alert.alert('Could not finish deleting', 'A recovery copy was made before deletion. Check Profile before trying again.');
+              console.warn('Could not delete topic data:', error);
+              Alert.alert(L('Could not finish deleting', 'Kunne ikke fullføre slettingen'), L('A recovery copy was made first. Check Profile before trying again.', 'En gjenopprettingskopi ble laget først. Sjekk Profil før du prøver igjen.'));
             }
           },
         },
-      ]
+      ],
     );
-  };
+  }
 
-  // Open topic
-  const openTopic = (topic: Topic) => {
-    router.push({
-      pathname: '/subject/topic/[id]',
-      params: {
-        id: String(topic.id),
-        name: topic.name,
-        subjectId: subjectId ?? '',
-      },
-    });
-  };
+  function openTopicMenu(topic: ProgressTopic) {
+    Alert.alert(topic.name, undefined, [
+      { text: L('Rename', 'Gi nytt navn'), onPress: () => openRename(topic) },
+      { text: L('Course material', 'Pensum'), onPress: () => setMaterialTopic(topic) },
+      { text: L('Delete', 'Slett'), style: 'destructive', onPress: () => confirmDelete(topic) },
+      { text: L('Cancel', 'Avbryt'), style: 'cancel' },
+    ]);
+  }
 
-  return (
-    <SafeAreaView style={styles.container}>
-      <Stack.Screen
-        options={{
-          headerShown: false,
-        }}
-      />
+  const addButton = (
+    <Pressable accessibilityRole="button" onPress={() => setAddVisible(true)} style={({ pressed }) => [styles.add, pressed && p.pressed]}>
+      <StudyIcon name="plus" size={16} color={palette.accent} />
+      <Text style={[styles.addText, { color: palette.accent }]}>{L('Add topic', 'Legg til tema')}</Text>
+    </Pressable>
+  );
 
-      <PullToRefreshScrollView
-        onRefresh={() => loadTopics()}
-        contentContainerStyle={styles.scrollContent}
-        showsVerticalScrollIndicator={false}
-        keyboardShouldPersistTaps="handled"
-      >
-        {/* Back */}
-        <Pressable
-          style={styles.backButton}
-          onPress={() => router.back()}
-        >
-          <Text style={styles.backText}>← Back</Text>
-        </Pressable>
+  let body;
+  if (!data || !metrics) {
+    body = <View style={styles.state}>{loading ? <ActivityIndicator color={palette.accent} /> : <Text style={p.body}>{L('This subject could not be loaded. Pull down to try again.', 'Emnet kunne ikke lastes inn. Dra ned for å prøve igjen.')}</Text>}</View>;
+  } else if (!subject) {
+    body = <View style={[p.card, p.empty]}><Text style={p.emptyTitle}>{L('This subject no longer exists', 'Dette emnet finnes ikke lenger')}</Text></View>;
+  } else {
+    const topics = metrics.topics.filter((topic) => topic.subjectId === subjectId);
+    const summary = metrics.subjects.find((item) => item.subjectId === subjectId);
+    const progress = summary?.progress ?? 0;
+    const count = (status: TopicStatus) => topics.filter((topic) => topic.status === status).length;
+    const shown = topics.filter((topic) => filter === 'all' || topic.status === filter);
+    const ordered = weakestFirst ? [...shown].sort((a, b) => a.practiceProgress - b.practiceProgress) : shown;
+    const now = Date.now();
+    const statusText = (topic: ProgressTopic) => (topic.status === 'completed' ? L('Completed', 'Fullført') : topic.status === 'in_progress' ? L('In progress', 'Påbegynt') : L('Not started', 'Ikke startet'));
 
-        {/* Header */}
-        <View style={styles.header}>
-          <View>
-            <Text style={styles.title}>Topics</Text>
-
-            <Text style={styles.subtitle}>
-              Manage the topics you need to study.
-            </Text>
-          </View>
-
-          <Pressable
-            style={styles.addButton}
-            onPress={openAddModal}
-          >
-            <Text style={styles.addButtonText}>+ Add</Text>
+    let list;
+    if (topics.length === 0) {
+      list = (
+        <View style={[p.card, p.empty]}>
+          <IconChip name="book" />
+          <Text style={p.emptyTitle}>{L('No topics yet', 'Ingen temaer ennå')}</Text>
+          <Text style={[p.body, studyStyles.centered]}>{L('Topics are what you study in this subject. Let AI suggest them, or add your own.', 'Temaer er det du studerer i emnet. La AI foreslå dem, eller legg til dine egne.')}</Text>
+          <Pressable accessibilityRole="button" onPress={() => setAddVisible(true)} style={({ pressed }) => [p.button, styles.wide, { backgroundColor: palette.accent }, pressed && p.pressed]}>
+            <Text style={p.buttonText}>{L('Add topics', 'Legg til temaer')}</Text>
           </Pressable>
         </View>
+      );
+    } else if (tab === 'topics') {
+      list = (
+        <>
+          <SectionHeader title={L('Topics', 'Temaer')} action={weakestFirst ? L('Lowest first', 'Lavest først') : L('Sort', 'Sorter')} onAction={() => setWeakestFirst((value) => !value)} />
+          <Chips<Filter>
+            value={filter}
+            onChange={setFilter}
+            items={[
+              { key: 'all', label: `${L('All', 'Alle')} ${topics.length}` },
+              { key: 'not_started', label: `${L('Not started', 'Ikke startet')} ${count('not_started')}` },
+              { key: 'in_progress', label: `${L('In progress', 'Påbegynt')} ${count('in_progress')}` },
+              { key: 'completed', label: `${L('Completed', 'Fullført')} ${count('completed')}` },
+            ]}
+          />
+          {ordered.length === 0 ? <View style={[p.card, p.empty]}><Text style={p.body}>{L('No topics match this filter.', 'Ingen temaer passer til dette filteret.')}</Text></View> : ordered.map((topic) => (
+            <View key={String(topic.id)} style={styles.topicRow}>
+              <Pressable accessibilityRole="button" accessibilityLabel={`${topic.name}. ${statusText(topic)}, ${topic.practiceProgress}%`} onPress={() => openTopic(topic)} style={({ pressed }) => [styles.topicMain, pressed && p.pressed]}>
+                <TopicRing progress={topic.practiceProgress} completed={topic.status === 'completed'} />
+                <View style={p.grow}>
+                  <Text style={styles.topicName} numberOfLines={1}>{topic.name}</Text>
+                  <Text style={styles.topicDetail} numberOfLines={1}>
+                    {statusText(topic)} · {topic.practiceProgress}%
+                    {topic.fadedPoints > 0 ? ` · ${L('fading', 'falmer')}` : ''}
+                  </Text>
+                </View>
+              </Pressable>
+              <Pressable accessibilityRole="button" accessibilityLabel={L(`Options for ${topic.name}`, `Valg for ${topic.name}`)} onPress={() => openTopicMenu(topic)} style={({ pressed }) => [styles.more, pressed && p.pressed]} hitSlop={6}>
+                <StudyIcon name="more" size={17} color={ink.muted} />
+              </Pressable>
+            </View>
+          ))}
+          {addButton}
+        </>
+      );
+    } else if (tab === 'flashcards') {
+      list = (
+        <>
+          <SectionHeader title="Flashcards" />
+          {topics.map((topic) => {
+            const cards = data.cards.filter((card) => String(card.topicId) === String(topic.id));
+            const due = cards.filter((card) => !card.nextReviewAt || !(new Date(card.nextReviewAt).getTime() > now)).length;
+            return (
+              <StudyRow
+                key={String(topic.id)}
+                icon="cards"
+                title={topic.name}
+                detail={cards.length === 0 ? L('No cards yet', 'Ingen kort ennå') : `${cards.length} ${L('cards', 'kort')} · ${due} ${L('due', 'forfalt')}`}
+                onPress={() => router.push({ pathname: '/subject/topic/flashcards', params: topicParams(topic) })}
+                trailing={due > 0 ? <PillButton label={`${L('Review', 'Repeter')} ${due}`} onPress={() => router.push({ pathname: '/subject/topic/study/review', params: topicParams(topic) })} /> : undefined}
+              />
+            );
+          })}
+        </>
+      );
+    } else if (tab === 'quizzes') {
+      list = (
+        <>
+          <SectionHeader title={L('Quizzes', 'Quizer')} />
+          {topics.map((topic) => {
+            const attempts = data.quizResults.filter((result) => String(result.topicId) === String(topic.id)).length;
+            return (
+              <StudyRow
+                key={String(topic.id)}
+                icon="quiz"
+                title={topic.name}
+                detail={attempts === 0 || topic.quizAccuracy === null
+                  ? L('No quiz taken yet', 'Ingen quiz tatt ennå')
+                  : `${attempts} ${attempts === 1 ? L('attempt', 'forsøk') : L('attempts', 'forsøk')} · ${topic.quizAccuracy}% ${L('correct', 'riktig')}`}
+                onPress={() => router.push({ pathname: '/subject/topic/study/quiz', params: topicParams(topic) })}
+              />
+            );
+          })}
+        </>
+      );
+    } else {
+      list = (
+        <>
+          <SectionHeader title={L('Course material', 'Pensum')} />
+          <Text style={p.small}>{L('Notes and PDFs you save on a topic. AI uses them for that topic\'s flashcards, quizzes and Active Recall.', 'Notater og PDF-er du lagrer på et tema. AI bruker dem til flashcards, quiz og Active Recall i det temaet.')}</Text>
+          {topics.map((topic) => {
+            const saved = notesByTopic[String(topic.id)]?.text.length ?? 0;
+            return (
+              <StudyRow
+                key={String(topic.id)}
+                icon="note"
+                title={topic.name}
+                detail={saved ? L(`Material saved · ${saved.toLocaleString('en-GB')} characters`, `Pensum lagret · ${saved.toLocaleString('nb-NO')} tegn`) : L('No material yet', 'Ikke noe pensum ennå')}
+                onPress={() => setMaterialTopic(topic)}
+                trailing={<StudyIcon name={saved ? 'pencil' : 'plus'} size={15} color={ink.muted} />}
+              />
+            );
+          })}
+        </>
+      );
+    }
 
-        {/* Topic count */}
-        <View style={styles.countCard}>
-          <Text style={styles.countNumber}>{topics.length}</Text>
-
-          <Text style={styles.countText}>
-            {topics.length === 1 ? 'topic' : 'topics'}
-          </Text>
+    body = (
+      <>
+        <View style={styles.hero}>
+          <SubjectGlyph name={subjectName} index={subjectIndex} size={64} />
+          <View style={p.grow}>
+            <Text style={styles.heroTitle} numberOfLines={2} accessibilityRole="header">{subjectName}</Text>
+            <Text style={styles.heroDetail}>{L(`${count('completed')} of ${topics.length} topics completed`, `${count('completed')} av ${topics.length} temaer fullført`)}</Text>
+            <View style={styles.heroProgress}>
+              <View style={p.grow}><ProgressBar value={progress} color={palette.accent} trackColor={palette.track} height={7} /></View>
+              <Text style={styles.heroPercent}>{progress}%</Text>
+            </View>
+          </View>
         </View>
 
-        {/* Topics */}
-        {loading ? (
-          <Text style={styles.emptyText}>
-            Loading topics...
-          </Text>
-        ) : topics.length === 0 ? (
-          <View style={styles.emptyCard}>
-            <View style={styles.emptyIconBox}>
-              <Text style={styles.emptyIcon}>📚</Text>
-            </View>
+        <Segments<Tab>
+          value={tab}
+          onChange={setTab}
+          items={[
+            { key: 'topics', label: L('Topics', 'Temaer') },
+            { key: 'flashcards', label: L('Cards', 'Kort') },
+            { key: 'quizzes', label: L('Quizzes', 'Quizer') },
+            { key: 'notes', label: L('Notes', 'Pensum') },
+          ]}
+        />
+        {list}
+      </>
+    );
+  }
 
-            <Text style={styles.emptyTitle}>
-              No topics yet
-            </Text>
-
-            <Text style={styles.emptyDescription}>
-              Add the topics you need to study for this subject.
-            </Text>
-
-            <Pressable
-              style={styles.emptyAddButton}
-              onPress={openAddModal}
-            >
-              <Text style={styles.emptyAddButtonText}>
-                + Add your first topic
-              </Text>
-            </Pressable>
-          </View>
-        ) : (
-          <View style={styles.topicList}>
-            {topics.map((topic, index) => (
-              <View
-                key={topic.id}
-                style={styles.topicCard}
-              >
-                <Pressable
-                  style={styles.topicMain}
-                  onPress={() => openTopic(topic)}
-                >
-                  <View style={styles.numberBox}>
-                    <Text style={styles.numberText}>
-                      {index + 1}
-                    </Text>
-                  </View>
-
-                  <View style={styles.topicContent}>
-                    <Text style={styles.topicName}>
-                      {topic.name}
-                    </Text>
-
-                    <Text style={styles.topicHint}>
-                      Tap to study this topic
-                    </Text>
-                  </View>
-
-                  <Text style={styles.arrow}>›</Text>
-                </Pressable>
-
-                <View style={styles.actions}>
-                  <Pressable
-                    style={styles.editButton}
-                    onPress={() => openEditModal(topic)}
-                  >
-                    <Text style={styles.editButtonText}>
-                      Edit
-                    </Text>
-                  </Pressable>
-
-                  <Pressable
-                    style={styles.deleteButton}
-                    onPress={() => deleteTopic(topic)}
-                  >
-                    <Text style={styles.deleteButtonText}>
-                      Delete
-                    </Text>
-                  </Pressable>
-                </View>
-              </View>
-            ))}
-          </View>
-        )}
+  return (
+    <SafeAreaView style={ui.container} edges={['top']}>
+      <Stack.Screen options={{ headerShown: false }} />
+      <PullToRefreshScrollView contentContainerStyle={studyStyles.content} showsVerticalScrollIndicator={false} onRefresh={async () => { await Promise.all([reload(), loadNotes()]); }}>
+        <ScreenBar backLabel={L('Back', 'Tilbake')} onMenu={subject ? openMenu : undefined} menuLabel={L('More options', 'Flere valg')} />
+        {body}
       </PullToRefreshScrollView>
 
-      {/* Add / Edit Modal */}
-      <Modal
-        visible={modalVisible}
-        transparent
-        animationType="slide"
-        onRequestClose={() => setModalVisible(false)}
-      >
-        <KeyboardAvoidingView
-          style={styles.keyboardContainer}
-          behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
-        >
-          <View style={styles.modalOverlay}>
-            <ScrollView
-              style={styles.modalScroll}
-              contentContainerStyle={styles.modalScrollContent}
-              keyboardShouldPersistTaps="handled"
-              keyboardDismissMode={Platform.OS === 'ios' ? 'interactive' : 'on-drag'}
-              automaticallyAdjustKeyboardInsets={Platform.OS === 'ios'}
-            >
-            <View style={styles.modalContainer}>
-              <View style={styles.modalHandle} />
+      <AddTopicSheet visible={addVisible} onClose={() => setAddVisible(false)} subjectName={subjectName} existingNames={savedTopics.map((topic) => topic.name)} onAdd={addTopics} />
 
-              <Text style={styles.modalTitle}>
-                {editingTopic ? 'Edit topic' : 'Add topic'}
-              </Text>
+      <TopicMaterialSheet
+        visible={materialTopic !== null}
+        onClose={() => { setMaterialTopic(null); void loadNotes(); }}
+        state={materialNotes}
+        topicName={materialTopic?.name ?? ''}
+      />
 
-              <Text style={styles.modalSubtitle}>
-                {editingTopic
-                  ? 'Change the name of this topic.'
-                  : 'Enter the name of the topic you want to study.'}
-              </Text>
-
+      <Modal visible={renaming !== null} transparent animationType="slide" onRequestClose={() => { if (!saving) setRenaming(null); }}>
+        <KeyboardAvoidingView style={ui.modalKeyboard} behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
+          <View style={ui.modalBackdrop}>
+            <View style={ui.modalCard}>
+              <Text style={ui.modalTitle}>{L('Rename topic', 'Gi temaet nytt navn')}</Text>
+              <Text style={ui.cardDescription}>{L('Questions, flashcards and progress stay with the topic.', 'Spørsmål, flashcards og fremgang følger temaet.')}</Text>
               <TextInput
-                style={styles.input}
-                placeholder="e.g. Cranial nerves"
-                placeholderTextColor={appColor('#9AAAB5', 'text')}
-                value={topicName}
-                onChangeText={setTopicName}
+                value={renameText}
+                onChangeText={(value) => { setRenameText(value); setRenameError(''); }}
+                style={ui.textInput}
+                maxLength={MAX_TOPIC_NAME_LENGTH}
                 autoFocus
                 returnKeyType="done"
-                onSubmitEditing={saveTopic}
+                onSubmitEditing={() => { void saveRename(); }}
+                placeholderTextColor={appColor('#91A2AE', 'text')}
+                accessibilityLabel={L('Topic name', 'Navn på temaet')}
               />
-
-              <View style={styles.modalButtons}>
-                <Pressable
-                  style={styles.cancelButton}
-                  onPress={() => {
-                    setModalVisible(false);
-                    setTopicName('');
-                    setEditingTopic(null);
-                  }}
-                >
-                  <Text style={styles.cancelButtonText}>
-                    Cancel
-                  </Text>
-                </Pressable>
-
-                <Pressable
-                  style={styles.saveButton}
-                  onPress={saveTopic}
-                >
-                  <Text style={styles.saveButtonText}>
-                    {editingTopic
-                      ? 'Save changes'
-                      : 'Add topic'}
-                  </Text>
+              {renameError ? <Text style={ui.formError}>{renameError}</Text> : null}
+              <View style={ui.modalActions}>
+                <Pressable accessibilityRole="button" style={ui.secondaryButton} onPress={() => setRenaming(null)} disabled={saving}><Text style={ui.secondaryButtonText}>{L('Cancel', 'Avbryt')}</Text></Pressable>
+                <Pressable accessibilityRole="button" style={[ui.primaryButton, (!renameText.trim() || saving) && ui.disabled]} onPress={() => { void saveRename(); }} disabled={!renameText.trim() || saving}>
+                  {saving ? <ActivityIndicator color="#FFFFFF" /> : <Text style={ui.primaryButtonText}>{L('Save', 'Lagre')}</Text>}
                 </Pressable>
               </View>
             </View>
-            </ScrollView>
           </View>
         </KeyboardAvoidingView>
       </Modal>
@@ -382,317 +371,18 @@ export default function TopicsScreen() {
 }
 
 const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: appColor('#F7FBFE', 'background'),
-  },
-
-  scrollContent: {
-    paddingHorizontal: 20,
-    paddingBottom: 40,
-  },
-
-  backButton: {
-    marginTop: 12,
-    marginBottom: 24,
-  },
-
-  backText: {
-    fontSize: 15,
-    fontWeight: '600',
-    color: appColor('#43A5D1', 'text'),
-  },
-
-  header: {
-    flexDirection: 'row',
-    alignItems: 'flex-start',
-    justifyContent: 'space-between',
-  },
-
-  title: {
-    fontSize: 30,
-    fontWeight: '800',
-    color: appColor('#17324D', 'text'),
-  },
-
-  subtitle: {
-    fontSize: 15,
-    color: appColor('#7A8B99', 'text'),
-    marginTop: 8,
-    lineHeight: 21,
-    maxWidth: 260,
-  },
-
-  addButton: {
-    backgroundColor: appColor('#4AA9D8', 'background'),
-    paddingHorizontal: 16,
-    paddingVertical: 10,
-    borderRadius: 14,
-  },
-
-  addButtonText: {
-    color: appColor('#FFFFFF', 'text'),
-    fontSize: 14,
-    fontWeight: '700',
-  },
-
-  countCard: {
-    marginTop: 24,
-    backgroundColor: appColor('#E8F7FF', 'background'),
-    borderRadius: 18,
-    padding: 18,
-    flexDirection: 'row',
-    alignItems: 'baseline',
-  },
-
-  countNumber: {
-    fontSize: 28,
-    fontWeight: '800',
-    color: appColor('#318DBA', 'text'),
-  },
-
-  countText: {
-    fontSize: 15,
-    fontWeight: '600',
-    color: appColor('#6C8798', 'text'),
-    marginLeft: 8,
-  },
-
-  topicList: {
-    marginTop: 18,
-  },
-
-  topicCard: {
-    backgroundColor: appColor('#FFFFFF', 'background'),
-    borderRadius: 20,
-    marginBottom: 14,
-    padding: 16,
-  },
-
-  topicMain: {
-    flexDirection: 'row',
-    alignItems: 'center',
-  },
-
-  numberBox: {
-    width: 44,
-    height: 44,
-    borderRadius: 14,
-    backgroundColor: appColor('#E3F5FF', 'background'),
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-
-  numberText: {
-    fontSize: 16,
-    fontWeight: '800',
-    color: appColor('#43A5D1', 'text'),
-  },
-
-  topicContent: {
-    flex: 1,
-    marginLeft: 14,
-  },
-
-  topicName: {
-    fontSize: 17,
-    fontWeight: '700',
-    color: appColor('#17324D', 'text'),
-  },
-
-  topicHint: {
-    fontSize: 12,
-    color: appColor('#94A3AE', 'text'),
-    marginTop: 4,
-  },
-
-  arrow: {
-    fontSize: 28,
-    fontWeight: '300',
-    color: appColor('#9AB5C4', 'text'),
-    marginLeft: 10,
-  },
-
-  actions: {
-    flexDirection: 'row',
-    marginTop: 14,
-    paddingTop: 12,
-    borderTopWidth: 1,
-    borderTopColor: '#EEF3F6',
-  },
-
-  editButton: {
-    flex: 1,
-    backgroundColor: appColor('#F0F8FC', 'background'),
-    paddingVertical: 10,
-    borderRadius: 12,
-    alignItems: 'center',
-    marginRight: 6,
-  },
-
-  editButtonText: {
-    fontSize: 13,
-    fontWeight: '700',
-    color: appColor('#43A5D1', 'text'),
-  },
-
-  deleteButton: {
-    flex: 1,
-    backgroundColor: appColor('#FFF3F3', 'background'),
-    paddingVertical: 10,
-    borderRadius: 12,
-    alignItems: 'center',
-    marginLeft: 6,
-  },
-
-  deleteButtonText: {
-    fontSize: 13,
-    fontWeight: '700',
-    color: appColor('#D96B6B', 'text'),
-  },
-
-  emptyCard: {
-    marginTop: 24,
-    backgroundColor: appColor('#FFFFFF', 'background'),
-    borderRadius: 22,
-    padding: 28,
-    alignItems: 'center',
-  },
-
-  emptyIconBox: {
-    width: 64,
-    height: 64,
-    borderRadius: 20,
-    backgroundColor: appColor('#E3F5FF', 'background'),
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-
-  emptyIcon: {
-    fontSize: 30,
-  },
-
-  emptyTitle: {
-    fontSize: 19,
-    fontWeight: '800',
-    color: appColor('#17324D', 'text'),
-    marginTop: 18,
-  },
-
-  emptyDescription: {
-    fontSize: 14,
-    color: appColor('#8494A0', 'text'),
-    textAlign: 'center',
-    lineHeight: 21,
-    marginTop: 8,
-  },
-
-  emptyAddButton: {
-    backgroundColor: appColor('#4AA5D1', 'background'),
-    paddingHorizontal: 18,
-    paddingVertical: 12,
-    borderRadius: 14,
-    marginTop: 20,
-  },
-
-  emptyAddButtonText: {
-    color: appColor('#FFFFFF', 'text'),
-    fontSize: 14,
-    fontWeight: '700',
-  },
-
-  emptyText: {
-    textAlign: 'center',
-    marginTop: 30,
-    color: appColor('#8494A0', 'text'),
-  },
-
-  keyboardContainer: {
-    flex: 1,
-  },
-
-  modalOverlay: {
-    flex: 1,
-    backgroundColor: 'rgba(20, 45, 65, 0.25)',
-    justifyContent: 'flex-end',
-  },
-  modalScroll: { flex: 1 },
-  modalScrollContent: { flexGrow: 1, justifyContent: 'flex-end' },
-
-  modalContainer: {
-    backgroundColor: appColor('#FFFFFF', 'background'),
-    borderTopLeftRadius: 28,
-    borderTopRightRadius: 28,
-    padding: 24,
-    paddingBottom: 36,
-  },
-
-  modalHandle: {
-    width: 42,
-    height: 5,
-    borderRadius: 3,
-    backgroundColor: appColor('#D8E2E8', 'background'),
-    alignSelf: 'center',
-    marginBottom: 22,
-  },
-
-  modalTitle: {
-    fontSize: 24,
-    fontWeight: '800',
-    color: appColor('#17324D', 'text'),
-  },
-
-  modalSubtitle: {
-    fontSize: 14,
-    color: appColor('#8494A0', 'text'),
-    marginTop: 7,
-    lineHeight: 20,
-  },
-
-  input: {
-    backgroundColor: appColor('#F5F9FB', 'background'),
-    borderRadius: 15,
-    paddingHorizontal: 16,
-    paddingVertical: 14,
-    fontSize: 16,
-    color: appColor('#17324D', 'text'),
-    marginTop: 20,
-    borderWidth: 1,
-    borderColor: appColor('#E4EDF2', 'border'),
-  },
-
-  modalButtons: {
-    flexDirection: 'row',
-    marginTop: 18,
-  },
-
-  cancelButton: {
-    flex: 1,
-    backgroundColor: appColor('#F2F6F8', 'background'),
-    paddingVertical: 14,
-    borderRadius: 15,
-    alignItems: 'center',
-    marginRight: 6,
-  },
-
-  cancelButtonText: {
-    fontSize: 14,
-    fontWeight: '700',
-    color: appColor('#718592', 'text'),
-  },
-
-  saveButton: {
-    flex: 1,
-    backgroundColor: appColor('#4AA9D8', 'background'),
-    paddingVertical: 14,
-    borderRadius: 15,
-    alignItems: 'center',
-    marginLeft: 6,
-  },
-
-  saveButtonText: {
-    fontSize: 14,
-    fontWeight: '700',
-    color: appColor('#FFFFFF', 'text'),
-  },
+  state: { alignItems: 'center', paddingVertical: 60 },
+  wide: { alignSelf: 'stretch' },
+  hero: { flexDirection: 'row', alignItems: 'center', gap: 16 },
+  heroTitle: { color: ink.primary, fontSize: 24, fontWeight: '800', letterSpacing: -0.3 },
+  heroDetail: { color: ink.secondary, fontSize: 13, marginTop: 3 },
+  heroProgress: { flexDirection: 'row', alignItems: 'center', gap: 10, marginTop: 9 },
+  heroPercent: { color: ink.primary, fontSize: 13, fontWeight: '800', minWidth: 34, textAlign: 'right' },
+  topicRow: { flexDirection: 'row', alignItems: 'center', borderRadius: 18, backgroundColor: appColor('#FFFFFF', 'background'), borderWidth: 1, borderColor: appColor('#E7F0F4', 'border'), ...cardShadow },
+  topicMain: { flex: 1, flexDirection: 'row', alignItems: 'center', gap: 13, paddingVertical: 13, paddingLeft: 14 },
+  topicName: { color: ink.primary, fontSize: 15, fontWeight: '700' },
+  topicDetail: { color: ink.muted, fontSize: 12, marginTop: 3 },
+  more: { width: 48, alignSelf: 'stretch', alignItems: 'center', justifyContent: 'center' },
+  add: { minHeight: 52, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8, borderRadius: 16, borderWidth: 1, borderStyle: 'dashed', borderColor: appColor('#BFD9E4', 'border') },
+  addText: { fontSize: 14, fontWeight: '800' },
 });

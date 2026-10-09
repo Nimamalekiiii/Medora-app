@@ -1,14 +1,14 @@
+import { forgetLastAccount } from '@/services/last-account';
 import { LocalizedText as Text } from '@/components/localized-text';
 import { appColor } from '@/constants/adaptive-color';
 import { useState } from 'react';
-import { ActivityIndicator, Alert, Modal, Pressable, StyleSheet, TextInput, View } from 'react-native';
+import { ActivityIndicator, Alert, KeyboardAvoidingView, Modal, Platform, Pressable, StyleSheet, TextInput, View } from 'react-native';
 import { router } from 'expo-router';
-import { SafeAreaView } from 'react-native-safe-area-context';
-import { SettingsCard, SettingsNote, SettingsPage, SettingsRow } from './shared';
+import { SettingsCard, SettingsNote, SettingsPage, SettingsRow } from '@/components/settings-shared';
 import { useAppSettings } from '../../services/app-settings-context';
 import { tr } from '../../services/localization';
 import { deleteAllStudyContent } from '../../services/storage';
-import { getSupabaseAuthClient } from '../../services/cloud-sync';
+import { forgetAccountOnDevice, getSupabaseAuthClient } from '../../services/cloud-sync';
 import { getSupabaseClient } from '../../services/supabase';
 import { removeProfileAvatar } from '../../services/profile-avatar';
 
@@ -43,29 +43,32 @@ export default function PrivacySettings() {
       const { error } = await client.rpc('delete_my_medexam_account');
       if (error) throw error;
       await auth.signOut();
+      await forgetLastAccount();
+      await forgetAccountOnDevice(session.user.id);
       setDeleteAccountOpen(false);
-      Alert.alert(tr('Account deleted', preferences.language), 'The account and cloud copy were removed. Local study data on this device was kept.');
+      Alert.alert(tr('Account deleted', preferences.language), tr('The account, its cloud copy and the study data on this device were removed.', preferences.language));
       router.replace('/welcome');
     } catch (error) {
-      Alert.alert(tr('Could not delete account', preferences.language), error instanceof Error ? `${error.message}\n\nApply the latest MedExam Supabase migration, then try again.` : 'Apply the latest MedExam Supabase migration, then try again.');
+      console.warn('Could not delete the account:', error);
+      Alert.alert(tr('Could not delete account', preferences.language), tr('Your account was not deleted. Check your connection and try again.', preferences.language));
     } finally { setBusy(false); }
   }
 
   return <>
     <SettingsPage title="Privacy & data" description="Understand what is stored and decide what to keep or remove.">
-      <SettingsCard title="AI and privacy"><Text style={styles.copy}>{tr('AI study materials use the subject, topic and any notes you add only when you ask for questions or flashcards. When you tap Review my progress, MedExam sends calculated summaries of subject and topic activity, quiz and practice results, flashcard reviews, study-day trends, upcoming exam details, saved plans and study preferences so AI can suggest a next step. It does not send your study notes or account email for this progress review. Automatic study-plan recommendations have a separate setting. Do not include patient-identifiable or other sensitive information; check generated medical content against trusted course sources.', preferences.language)}</Text></SettingsCard>
+      <SettingsCard title="AI and privacy"><Text style={styles.copy}>{tr('AI study materials use the subject, topic and any notes you add only when you ask for questions or flashcards. A PDF you choose to import is sent to AI to be turned into notes. When you tap Review my progress, Medora sends calculated summaries of subject and topic activity, quiz and practice results, flashcard reviews, study-day trends, upcoming exam details, saved plans and study preferences so AI can suggest a next step. It does not send your study notes or account email for this progress review. Automatic study-plan recommendations have a separate setting. Do not include patient-identifiable or other sensitive information; check generated medical content against trusted course sources.', preferences.language)}</Text></SettingsCard>
       <SettingsCard title="Your data">
         <SettingsRow title="Open Data & account" description="Export, restore, cloud sync, and account details" onPress={() => router.push('/settings/data')} />
         <SettingsRow title="Delete study data" description="Keep your account, remove study content from this device and synced copy" onPress={clearStudyData} destructive />
-        <SettingsRow title="Delete account" description="Permanently remove your MedExam sign-in and cloud account" onPress={() => { setConfirmation(''); setDeleteAccountOpen(true); }} destructive />
+        <SettingsRow title="Delete account" description="Permanently remove your Medora sign-in and cloud account" onPress={() => { setConfirmation(''); setDeleteAccountOpen(true); }} destructive />
       </SettingsCard>
       <SettingsNote>Your profile picture is private to your account when the profile image storage migration has been applied. Backup and sync status is available under Data & account.</SettingsNote>
       {busy ? <ActivityIndicator color={appColor('#327E9D', 'text')} /> : null}
     </SettingsPage>
     <Modal visible={deleteAccountOpen} transparent animationType="fade" onRequestClose={() => setDeleteAccountOpen(false)}>
-      <SafeAreaView style={styles.scrim}><View style={styles.modal}><Text style={styles.modalTitle}>{tr('Delete account permanently?', preferences.language)}</Text><Text style={styles.copy}>{tr('This removes your Supabase sign-in and cloud study copy. Local study data on this device is kept. You will be signed out. This cannot be undone.', preferences.language)}</Text><Text style={styles.label}>Type DELETE to confirm</Text><TextInput autoCapitalize="characters" value={confirmation} onChangeText={setConfirmation} style={styles.input} editable={!busy} />
+      <KeyboardAvoidingView style={styles.scrim} behavior={Platform.OS === 'ios' ? 'padding' : 'height'}><View style={styles.modal}><Text style={styles.modalTitle}>{tr('Delete account permanently?', preferences.language)}</Text><Text style={styles.copy}>{tr('This removes your sign-in, your cloud study copy and the study data on this device. You will be signed out. This cannot be undone.', preferences.language)}</Text><Text style={styles.label}>Type DELETE to confirm</Text><TextInput autoCapitalize="characters" value={confirmation} onChangeText={setConfirmation} style={styles.input} editable={!busy} />
         <View style={styles.buttons}><Pressable disabled={busy} onPress={() => setDeleteAccountOpen(false)} style={styles.cancel}><Text style={styles.cancelText}>Cancel</Text></Pressable><Pressable disabled={busy || confirmation !== 'DELETE'} onPress={() => void deleteAccount()} style={[styles.delete, (busy || confirmation !== 'DELETE') && { opacity: 0.5 }]}><Text style={styles.deleteText}>{busy ? 'Deleting…' : tr('Delete account', preferences.language)}</Text></Pressable></View>
-      </View></SafeAreaView>
+      </View></KeyboardAvoidingView>
     </Modal>
   </>;
 }

@@ -1,2709 +1,373 @@
-import { LocalizedText as Text } from '@/components/localized-text';
+import { cardShadow } from '@/components/gloss';
+import { IconChip } from '@/components/study/icon-chip';
+import { ProgressBar } from '@/components/charts';
+import { ink, p, useProgressPalette } from '@/components/progress/theme';
+import PullToRefreshScrollView from '@/components/pull-to-refresh-scroll-view';
+import { Chips, ScreenBar, SectionHeader, studyStyles } from '@/components/study/study-ui';
+import { TopicRing } from '@/components/study/subject-glyph';
+import { StudyIcon } from '@/components/study-icon';
 import { appColor } from '@/constants/adaptive-color';
-import { Stack, router, useFocusEffect, useLocalSearchParams } from 'expo-router';
-import { useCallback, useMemo, useState } from 'react';
-import {
-  Alert,
-  Modal,
-  Platform,
-  Pressable,
-  ScrollView,
-  StyleSheet,
-  View,
-} from 'react-native';
+import { ui } from '@/constants/ui';
+import { useStudyData } from '@/hooks/use-study-data';
+import { useAppSettings } from '@/services/app-settings-context';
+import { dateToKey, getDaysUntil, keyToDate } from '@/services/dates';
+import { getExamsBySubject, saveExamsBySubject } from '@/services/storage';
+import { countStudyDaysUntil, orderPlanTopics, resolveStudyPlan } from '@/services/subject-plan';
+import type { Exam } from '@/types/study';
+import { Stack, router, useLocalSearchParams } from 'expo-router';
+import { useState } from 'react';
+import { ActivityIndicator, Alert, Modal, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { getTopicsBySubject, getExamForSubject, getExamsBySubject, saveExamsBySubject } from '../../services/storage';
-import PullToRefreshScrollView from '../../components/pull-to-refresh-scroll-view';
 
-type Topic = {
-  id: number;
-  name: string;
+const param = (value: string | string[] | undefined) => (Array.isArray(value) ? value[0] ?? '' : value ?? '');
+/** Saved as written here, so existing exams keep working. */
+const EXAM_TYPES = ['Written exam', 'Oral exam', 'Practical exam', 'Multiple choice', 'OSCE', 'Other'] as const;
+const TYPE_NO: Record<string, string> = {
+  'Written exam': 'Skriftlig', 'Oral exam': 'Muntlig', 'Practical exam': 'Praktisk', 'Multiple choice': 'Flervalg', OSCE: 'OSCE', Other: 'Annet',
+};
+const TYPE_EN: Record<string, string> = {
+  'Written exam': 'Written', 'Oral exam': 'Oral', 'Practical exam': 'Practical', 'Multiple choice': 'Multiple choice', OSCE: 'OSCE', Other: 'Other',
 };
 
-type TopicsBySubject = {
-  [subjectId: string]: Topic[];
-};
+const sameDay = (left: Date, right: Date) => left.getFullYear() === right.getFullYear() && left.getMonth() === right.getMonth() && left.getDate() === right.getDate();
 
-type Exam = {
-  date: string;
-  type: string;
-  topicIds: number[];
-};
+/** A subject's exam: the countdown, how ready she is, the topics it covers, and editing it. */
+export default function ExamScreen() {
+  const params = useLocalSearchParams<{ id?: string | string[]; name?: string | string[] }>();
+  const subjectId = param(params.id);
+  const { preferences } = useAppSettings();
+  const language = preferences.language;
+  const L = (en: string, no: string) => (language === 'no' ? no : en);
+  const locale = language === 'no' ? 'nb-NO' : 'en-GB';
+  const palette = useProgressPalette();
+  const { loading, data, metrics, todayKey, reload } = useStudyData();
 
-type ExamsBySubject = {
-  [subjectId: string]: Exam | null;
-};
+  const subject = data?.subjects.find((item) => String(item.id) === subjectId);
+  const subjectName = subject?.name ?? (param(params.name) || L('Subject', 'Emne'));
+  const routeParams = { id: subjectId, name: subjectName };
+  const exam = data?.exams[subjectId] ?? null;
+  const topics = (metrics?.topics ?? []).filter((topic) => topic.subjectId === subjectId);
 
-type ModalView =
-  | 'edit'
-  | 'date'
-  | 'type'
-  | 'topics'
-  | null;
+  // The editor.
+  const [editing, setEditing] = useState(false);
+  const [date, setDate] = useState(new Date());
+  const [month, setMonth] = useState(new Date());
+  const [type, setType] = useState<string>(EXAM_TYPES[0]);
+  const [topicIds, setTopicIds] = useState<number[]>([]);
+  const [saving, setSaving] = useState(false);
+  const [saveFailed, setSaveFailed] = useState(false);
 
-const examTypes = [
-  'Written exam',
-  'Oral exam',
-  'Practical exam',
-  'Multiple choice',
-  'OSCE',
-  'Other',
-];
+  const typeLabel = (value: string) => (language === 'no' ? TYPE_NO[value] : TYPE_EN[value]) ?? value;
 
-const monthNames = [
-  'January',
-  'February',
-  'March',
-  'April',
-  'May',
-  'June',
-  'July',
-  'August',
-  'September',
-  'October',
-  'November',
-  'December',
-];
+  function openEditor() {
+    const start = exam ? keyToDate(exam.date) : new Date();
+    setDate(start);
+    setMonth(new Date(start.getFullYear(), start.getMonth(), 1));
+    setType(exam?.type ?? EXAM_TYPES[0]);
+    setTopicIds(exam ? [...exam.topicIds] : []);
+    setSaveFailed(false);
+    setEditing(true);
+  }
 
-const weekdayNames = [
-  'M',
-  'T',
-  'W',
-  'T',
-  'F',
-  'S',
-  'S',
-];
+  async function store(next: Exam | null) {
+    const current = await getExamsBySubject();
+    await saveExamsBySubject({ ...current, [subjectId]: next });
+    await reload();
+  }
 
-function dateToKey(date: Date) {
-  const year = date.getFullYear();
+  async function saveExam() {
+    if (saving || !subjectId) return;
+    setSaving(true);
+    setSaveFailed(false);
+    try {
+      // Only keep topics that still exist.
+      const existing = new Set(topics.map((topic) => topic.id));
+      await store({ date: dateToKey(date), type, topicIds: topicIds.filter((id) => existing.has(id)) });
+      setEditing(false);
+    } catch (error) {
+      console.warn('Could not save the exam:', error);
+      setSaveFailed(true);
+    } finally {
+      setSaving(false);
+    }
+  }
 
-  const month = String(
-    date.getMonth() + 1,
-  ).padStart(2, '0');
+  function confirmDelete() {
+    Alert.alert(L('Delete exam?', 'Slette eksamen?'), L('This removes the date, the type and the chosen topics. Your topics and progress stay.', 'Dette fjerner dato, type og valgte temaer. Temaene og fremgangen din beholdes.'), [
+      { text: L('Cancel', 'Avbryt'), style: 'cancel' },
+      {
+        text: L('Delete', 'Slett'),
+        style: 'destructive',
+        onPress: async () => {
+          try {
+            await store(null);
+          } catch (error) {
+            console.warn('Could not delete the exam:', error);
+            Alert.alert(L('Could not delete', 'Kunne ikke slette'), L('Try again.', 'Prøv igjen.'));
+          }
+        },
+      },
+    ]);
+  }
 
-  const day = String(
-    date.getDate(),
-  ).padStart(2, '0');
+  const toggleTopic = (id: number) => setTopicIds((current) => (current.includes(id) ? current.filter((item) => item !== id) : [...current, id]));
 
-  return `${year}-${month}-${day}`;
-}
-
-function keyToDate(key: string) {
-  const [year, month, day] =
-    key.split('-').map(Number);
-
-  return new Date(
-    year,
-    month - 1,
-    day,
-  );
-}
-
-function formatDate(dateKey: string) {
-  const date = keyToDate(dateKey);
-
-  return date.toLocaleDateString(
-    'en-GB',
-    {
-      day: 'numeric',
-      month: 'long',
-      year: 'numeric',
-    },
-  );
-}
-
-function getDaysUntilExam(
-  dateKey: string,
-) {
-  const examDate = keyToDate(dateKey);
-
+  // ----- Calendar -----
+  const year = month.getFullYear();
+  const monthIndex = month.getMonth();
+  const firstWeekday = (new Date(year, monthIndex, 1).getDay() + 6) % 7;
+  const daysInMonth = new Date(year, monthIndex + 1, 0).getDate();
+  const cells: (number | null)[] = [...Array<null>(firstWeekday).fill(null), ...Array.from({ length: daysInMonth }, (_, index) => index + 1)];
+  const weekdays = language === 'no' ? ['M', 'T', 'O', 'T', 'F', 'L', 'S'] : ['M', 'T', 'W', 'T', 'F', 'S', 'S'];
   const today = new Date();
 
-  examDate.setHours(
-    0,
-    0,
-    0,
-    0,
-  );
-
-  today.setHours(
-    0,
-    0,
-    0,
-    0,
-  );
-
-  const difference =
-    examDate.getTime() -
-    today.getTime();
-
-  return Math.ceil(
-    difference /
-      (1000 * 60 * 60 * 24),
-  );
-}
-
-/*
- * Returns the Monday-based index
- * of the first day in a month.
- */
-function getFirstDayOfMonth(
-  year: number,
-  month: number,
-) {
-  const day =
-    new Date(
-      year,
-      month,
-      1,
-    ).getDay();
-
-  return day === 0 ? 6 : day - 1;
-}
-
-export default function ExamScreen() {
-  const { id, name } =
-    useLocalSearchParams();
-
-  const subjectId =
-    Array.isArray(id)
-      ? id[0]
-      : id;
-
-  const subjectName =
-    Array.isArray(name)
-      ? name[0]
-      : name;
-
-  const [
-    topicsBySubject,
-    setTopicsBySubject,
-  ] = useState<TopicsBySubject>(
-    {},
-  );
-
-  const [
-    exam,
-    setExam,
-  ] = useState<Exam | null>(
-    null,
-  );
-
-  const [
-    loading,
-    setLoading,
-  ] = useState(true);
-
-  /*
-   * Only ONE modal is used.
-   */
-  const [
-    modalView,
-    setModalView,
-  ] = useState<ModalView>(
-    null,
-  );
-
-  const [
-    selectedDate,
-    setSelectedDate,
-  ] = useState(
-    new Date(),
-  );
-
-  const [
-    selectedType,
-    setSelectedType,
-  ] = useState(
-    'Written exam',
-  );
-
-  const [
-    selectedTopicIds,
-    setSelectedTopicIds,
-  ] = useState<number[]>(
-    [],
-  );
-
-  /*
-   * Calendar month currently being viewed.
-   */
-  const [
-    calendarMonth,
-    setCalendarMonth,
-  ] = useState(
-    new Date(),
-  );
-
-  /*
-   * Topics screen can be opened from
-   * Edit exam or directly from Exam.
-   */
-  const [
-    topicsReturnToEdit,
-    setTopicsReturnToEdit,
-  ] = useState(false);
-
-  const topics =
-    topicsBySubject[
-      subjectId ?? ''
-    ] ?? [];
-
-  const daysUntilExam =
-    useMemo(() => {
-      if (!exam) {
-        return null;
-      }
-
-      return getDaysUntilExam(
-        exam.date,
-      );
-    }, [exam]);
-
-  const selectedTopicNames =
-    topics
-      .filter((topic) =>
-        exam?.topicIds.includes(
-          topic.id,
-        ),
-      )
-      .map(
-        (topic) => topic.name,
-      );
-
-  // =================================
-  // LOAD DATA
-  // =================================
-
-  useFocusEffect(useCallback(() => {
-    void loadData(false);
-  }, [subjectId]));
-
-  async function loadData(showLoading = true) {
-    if (showLoading) setLoading(true);
-
-    await Promise.all([
-      loadTopics(),
-      loadExam(),
-    ]);
-
-    setLoading(false);
-  }
-
-  /*
-   * Load topics separately.
-   *
-   * This is important because we can
-   * reload them whenever the Topics
-   * picker is opened.
-   */
-  async function loadTopics() {
-    try {
-      setTopicsBySubject(await getTopicsBySubject());
-    } catch (error) {
-      console.log(
-        'Could not load topics:',
-        error,
-      );
-    }
-  }
-
-  async function loadExam() {
-    try {
-      if (!subjectId) {
-        setExam(null);
-        return;
-      }
-      setExam(await getExamForSubject(subjectId));
-    } catch (error) {
-      console.log(
-        'Could not load exam:',
-        error,
-      );
-
-      setExam(null);
-    }
-  }
-
-  // =================================
-  // SAVE EXAM
-  // =================================
-
-  async function saveExam(
-    updatedExam: Exam | null,
-  ) {
-    if (!subjectId) {
-      return;
-    }
-
-    try {
-      const currentExams = await getExamsBySubject();
-
-      const updatedExams: ExamsBySubject =
-        {
-          ...currentExams,
-          [subjectId]:
-            updatedExam,
-        };
-
-      await saveExamsBySubject(updatedExams);
-
-      setExam(updatedExam);
-    } catch (error) {
-      console.log(
-        'Could not save exam:',
-        error,
-      );
-
-      Alert.alert(
-        'Could not save',
-        'Something went wrong while saving the exam.',
-      );
-    }
-  }
-
-  // =================================
-  // OPEN EDIT
-  // =================================
-
-  function openEdit() {
-    if (exam) {
-      const date =
-        keyToDate(exam.date);
-
-      setSelectedDate(date);
-
-      setCalendarMonth(date);
-
-      setSelectedType(
-        exam.type,
-      );
-
-      setSelectedTopicIds([
-        ...exam.topicIds,
-      ]);
-    } else {
-      const today = new Date();
-
-      setSelectedDate(today);
-
-      setCalendarMonth(today);
-
-      setSelectedType(
-        'Written exam',
-      );
-
-      setSelectedTopicIds([]);
-    }
-
-    setTopicsReturnToEdit(false);
-
-    setModalView('edit');
-  }
-
-  // =================================
-  // CLOSE MODAL
-  // =================================
-
-  function closeModal() {
-    setModalView(null);
-
-    setTopicsReturnToEdit(
-      false,
-    );
-  }
-
-  // =================================
-  // SAVE CHANGES
-  // =================================
-
-  async function saveChanges() {
-    const updatedExam: Exam = {
-      date: dateToKey(
-        selectedDate,
-      ),
-
-      type: selectedType,
-
-      topicIds:
-        selectedTopicIds,
-    };
-
-    await saveExam(
-      updatedExam,
-    );
-
-    closeModal();
-  }
-
-  // =================================
-  // DELETE EXAM
-  // =================================
-
-  function deleteExam() {
-    Alert.alert(
-      'Delete exam?',
-      'This will remove the exam date, exam type and selected topics.',
-      [
-        {
-          text: 'Cancel',
-          style: 'cancel',
-        },
-
-        {
-          text: 'Delete',
-          style: 'destructive',
-
-          onPress:
-            async () => {
-              await saveExam(
-                null,
-              );
-            },
-        },
-      ],
-    );
-  }
-
-  // =================================
-  // OPEN TOPICS
-  // =================================
-
-  async function openTopicsPicker(
-    fromEdit: boolean,
-  ) {
-    /*
-     * Reload topics every time.
-     *
-     * This makes sure topics added on
-     * the Topics page are immediately
-     * available here.
-     */
-    await loadTopics();
-
-    if (fromEdit) {
-      setSelectedTopicIds([
-        ...selectedTopicIds,
-      ]);
-    } else {
-      setSelectedTopicIds([
-        ...(exam?.topicIds ?? []),
-      ]);
-    }
-
-    setTopicsReturnToEdit(
-      fromEdit,
-    );
-
-    setModalView('topics');
-  }
-
-  function toggleTopic(
-    topicId: number,
-  ) {
-    setSelectedTopicIds(
-      (current) => {
-        if (
-          current.includes(
-            topicId,
-          )
-        ) {
-          return current.filter(
-            (id) =>
-              id !== topicId,
-          );
-        }
-
-        return [
-          ...current,
-          topicId,
-        ];
-      },
-    );
-  }
-
-  async function finishTopicsPicker() {
-    /*
-     * When coming from Edit exam,
-     * simply return to Edit.
-     *
-     * The main Done button will save
-     * everything together.
-     */
-    if (
-      topicsReturnToEdit
-    ) {
-      setModalView('edit');
-
-      return;
-    }
-
-    /*
-     * When opened directly from the
-     * main Exam page, save immediately.
-     */
-    if (exam) {
-      await saveExam({
-        ...exam,
-
-        topicIds:
-          selectedTopicIds,
-      });
-    }
-
-    closeModal();
-  }
-
-  // =================================
-  // CALENDAR
-  // =================================
-
-  function changeCalendarMonth(
-    amount: number,
-  ) {
-    setCalendarMonth(
-      (current) =>
-        new Date(
-          current.getFullYear(),
-          current.getMonth() +
-            amount,
-          1,
-        ),
-    );
-  }
-
-  function selectCalendarDate(
-    day: number,
-  ) {
-    const newDate =
-      new Date(
-        calendarMonth.getFullYear(),
-        calendarMonth.getMonth(),
-        day,
-      );
-
-    setSelectedDate(
-      newDate,
-    );
-  }
-
-  function isSameDate(
-    first: Date,
-    second: Date,
-  ) {
-    return (
-      first.getFullYear() ===
-        second.getFullYear() &&
-      first.getMonth() ===
-        second.getMonth() &&
-      first.getDate() ===
-        second.getDate()
-    );
-  }
-
-  function renderCalendar() {
-    const year =
-      calendarMonth.getFullYear();
-
-    const month =
-      calendarMonth.getMonth();
-
-    const firstDay =
-      getFirstDayOfMonth(
-        year,
-        month,
-      );
-
-    const daysInMonth =
-      new Date(
-        year,
-        month + 1,
-        0,
-      ).getDate();
-
-    const calendarDays: (
-      number | null
-    )[] = [];
-
-    for (
-      let i = 0;
-      i < firstDay;
-      i++
-    ) {
-      calendarDays.push(null);
-    }
-
-    for (
-      let day = 1;
-      day <= daysInMonth;
-      day++
-    ) {
-      calendarDays.push(day);
-    }
-
-    return (
-      <View
-        style={styles.calendar}
-      >
-        {/* MONTH HEADER */}
-
-        <View
-          style={
-            styles.calendarHeader
-          }
-        >
-          <Pressable
-            style={
-              styles.monthArrow
-            }
-            onPress={() =>
-              changeCalendarMonth(
-                -1,
-              )
-            }
-          >
-            <Text
-              style={
-                styles.monthArrowText
-              }
-            >
-              ‹
-            </Text>
-          </Pressable>
-
-          <Text
-            style={
-              styles.calendarMonthTitle
-            }
-          >
-            {monthNames[
-              month
-            ]}{' '}
-            {year}
-          </Text>
-
-          <Pressable
-            style={
-              styles.monthArrow
-            }
-            onPress={() =>
-              changeCalendarMonth(
-                1,
-              )
-            }
-          >
-            <Text
-              style={
-                styles.monthArrowText
-              }
-            >
-              ›
-            </Text>
-          </Pressable>
-        </View>
-
-        {/* WEEKDAYS */}
-
-        <View
-          style={
-            styles.weekdayRow
-          }
-        >
-          {weekdayNames.map(
-            (
-              weekday,
-              index,
-            ) => (
-              <View
-                key={`${weekday}-${index}`}
-                style={
-                  styles.weekdayCell
-                }
-              >
-                <Text
-                  style={
-                    styles.weekdayText
-                  }
-                >
-                  {weekday}
-                </Text>
+  const editor = (
+    <Modal visible={editing} transparent animationType="slide" onRequestClose={() => { if (!saving) setEditing(false); }}>
+      <View style={ui.modalBackdrop}>
+        <ScrollView style={styles.modalMax} contentContainerStyle={styles.modalScroll} showsVerticalScrollIndicator={false}>
+          <View style={ui.modalCard}>
+            <View style={ui.modalHeader}>
+              <View style={ui.modalIcon}><StudyIcon name="calendar" size={18} color={palette.accent} /></View>
+              <View style={ui.grow}>
+                <Text style={ui.modalTitle}>{exam ? L('Edit exam', 'Endre eksamen') : L('Set up exam', 'Legg inn eksamen')}</Text>
+                <Text style={ui.cardDescription} numberOfLines={1}>{subjectName}</Text>
               </View>
-            ),
-          )}
-        </View>
+            </View>
 
-        {/* DAYS */}
-
-        <View
-          style={
-            styles.daysGrid
-          }
-        >
-          {calendarDays.map(
-            (
-              day,
-              index,
-            ) => {
-              if (
-                day === null
-              ) {
-                return (
-                  <View
-                    key={`empty-${index}`}
-                    style={
-                      styles.dayCell
-                    }
-                  />
-                );
-              }
-
-              const date =
-                new Date(
-                  year,
-                  month,
-                  day,
-                );
-
-              const selected =
-                isSameDate(
-                  date,
-                  selectedDate,
-                );
-
-              const today =
-                isSameDate(
-                  date,
-                  new Date(),
-                );
-
-              return (
-                <Pressable
-                  key={day}
-                  style={[
-                    styles.dayCell,
-                    selected &&
-                      styles.selectedDay,
-                  ]}
-                  onPress={() =>
-                    selectCalendarDate(
-                      day,
-                    )
-                  }
-                >
-                  <Text
-                    style={[
-                      styles.dayText,
-                      selected &&
-                        styles.selectedDayText,
-                      today &&
-                        !selected &&
-                        styles.todayText,
-                    ]}
-                  >
-                    {day}
-                  </Text>
+            <Text style={ui.fieldLabel}>{L('DATE', 'DATO')}</Text>
+            <View style={styles.calendar}>
+              <View style={styles.calendarTop}>
+                <Pressable accessibilityRole="button" accessibilityLabel={L('Previous month', 'Forrige måned')} onPress={() => setMonth(new Date(year, monthIndex - 1, 1))} style={({ pressed }) => [styles.arrow, pressed && p.pressed]} hitSlop={6}>
+                  <StudyIcon name="chevronLeft" size={14} color={ink.secondary} />
                 </Pressable>
-              );
-            },
-          )}
-        </View>
+                <Text style={styles.monthTitle}>{month.toLocaleDateString(locale, { month: 'long', year: 'numeric' })}</Text>
+                <Pressable accessibilityRole="button" accessibilityLabel={L('Next month', 'Neste måned')} onPress={() => setMonth(new Date(year, monthIndex + 1, 1))} style={({ pressed }) => [styles.arrow, pressed && p.pressed]} hitSlop={6}>
+                  <StudyIcon name="chevron" size={14} color={ink.secondary} />
+                </Pressable>
+              </View>
+              <View style={styles.week}>
+                {weekdays.map((label, index) => <Text key={`${label}-${index}`} style={styles.weekday}>{label}</Text>)}
+              </View>
+              <View style={styles.days}>
+                {cells.map((day, index) => {
+                  if (day === null) return <View key={`blank-${index}`} style={styles.day} />;
+                  const cellDate = new Date(year, monthIndex, day);
+                  const selected = sameDay(cellDate, date);
+                  const isToday = sameDay(cellDate, today);
+                  return (
+                    <Pressable
+                      key={day}
+                      accessibilityRole="button"
+                      accessibilityState={{ selected }}
+                      accessibilityLabel={cellDate.toLocaleDateString(locale, { day: 'numeric', month: 'long', year: 'numeric' })}
+                      onPress={() => setDate(cellDate)}
+                      style={styles.day}
+                    >
+                      <View style={[styles.dayInner, selected && { backgroundColor: palette.accent }, !selected && isToday && { borderWidth: 1.5, borderColor: palette.accent }]}>
+                        <Text style={[styles.dayText, selected && styles.dayTextOn]}>{day}</Text>
+                      </View>
+                    </Pressable>
+                  );
+                })}
+              </View>
+            </View>
+            <Text style={p.small}>{date.toLocaleDateString(locale, { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' })}</Text>
+
+            <Text style={ui.fieldLabel}>{L('TYPE', 'TYPE')}</Text>
+            <Chips value={type} onChange={setType} items={EXAM_TYPES.map((value) => ({ key: value as string, label: typeLabel(value) }))} />
+
+            <View style={styles.topicsTop}>
+              <Text style={ui.fieldLabel}>{L('TOPICS IN THE EXAM', 'TEMAER TIL EKSAMEN')}</Text>
+              {topics.length > 0 ? (
+                <Pressable accessibilityRole="button" onPress={() => setTopicIds(topicIds.length === topics.length ? [] : topics.map((topic) => topic.id))} hitSlop={8}>
+                  <Text style={[styles.selectAll, { color: palette.accent }]}>{topicIds.length === topics.length ? L('Clear', 'Fjern alle') : L('Select all', 'Velg alle')}</Text>
+                </Pressable>
+              ) : null}
+            </View>
+            {topics.length === 0 ? (
+              <Text style={p.small}>{L('This subject has no topics yet. You can choose topics here once you have added them.', 'Emnet har ingen temaer ennå. Du kan velge temaer her når du har lagt dem til.')}</Text>
+            ) : (
+              <>
+                {topics.map((topic) => {
+                  const checked = topicIds.includes(topic.id);
+                  return (
+                    <Pressable key={topic.id} accessibilityRole="checkbox" accessibilityState={{ checked }} accessibilityLabel={topic.name} onPress={() => toggleTopic(topic.id)} style={({ pressed }) => [styles.check, pressed && p.pressed]}>
+                      <View style={[styles.box, checked && { backgroundColor: palette.accent, borderColor: palette.accent }]}>
+                        {checked ? <StudyIcon name="check" size={12} color="#FFFFFF" /> : null}
+                      </View>
+                      <Text style={styles.checkText} numberOfLines={1}>{topic.name}</Text>
+                    </Pressable>
+                  );
+                })}
+                <Text style={p.small}>{topicIds.length === 0 ? L('With none chosen, every topic in the subject counts.', 'Hvis ingen er valgt, teller alle temaene i emnet.') : L(`${topicIds.length} of ${topics.length} chosen.`, `${topicIds.length} av ${topics.length} valgt.`)}</Text>
+              </>
+            )}
+
+            {saveFailed ? <Text style={ui.formError}>{L('The exam could not be saved. Try again.', 'Eksamen kunne ikke lagres. Prøv igjen.')}</Text> : null}
+            <View style={ui.modalActions}>
+              <Pressable accessibilityRole="button" style={ui.secondaryButton} onPress={() => setEditing(false)} disabled={saving}><Text style={ui.secondaryButtonText}>{L('Cancel', 'Avbryt')}</Text></Pressable>
+              <Pressable accessibilityRole="button" style={[ui.primaryButton, saving && ui.disabled]} onPress={() => { void saveExam(); }} disabled={saving}>
+                {saving ? <ActivityIndicator color="#FFFFFF" /> : <Text style={ui.primaryButtonText}>{L('Save exam', 'Lagre eksamen')}</Text>}
+              </Pressable>
+            </View>
+          </View>
+        </ScrollView>
+      </View>
+    </Modal>
+  );
+
+  let body;
+  if (!data || !metrics) {
+    body = <View style={styles.state}>{loading ? <ActivityIndicator color={palette.accent} /> : <Text style={p.body}>{L('The exam could not be loaded. Pull down to try again.', 'Eksamen kunne ikke lastes inn. Dra ned for å prøve igjen.')}</Text>}</View>;
+  } else if (!exam) {
+    body = (
+      <View style={[p.card, p.empty]}>
+        <IconChip name="calendar" />
+        <Text style={p.emptyTitle}>{L('No exam set', 'Ingen eksamen lagt inn')}</Text>
+        <Text style={[p.body, studyStyles.centered]}>{L('Add the date and the topics it covers. The countdown, your readiness and the study plan follow from it.', 'Legg inn dato og temaene som inngår. Nedtelling, hvor klar du er og studieplanen følger av det.')}</Text>
+        <Pressable accessibilityRole="button" onPress={openEditor} style={({ pressed }) => [p.button, styles.wide, { backgroundColor: palette.accent }, pressed && p.pressed]}>
+          <Text style={p.buttonText}>{L('Set up exam', 'Legg inn eksamen')}</Text>
+        </Pressable>
       </View>
     );
-  }
+  } else {
+    const days = getDaysUntil(exam.date, todayKey);
+    const examTopics = orderPlanTopics(topics, exam.topicIds);
+    const completed = examTopics.filter((topic) => topic.status === 'completed').length;
+    const remaining = examTopics.length - completed;
+    const readiness = metrics.exams.find((item) => item.subjectId === subjectId)?.readiness
+      ?? (examTopics.length ? Math.round(examTopics.reduce((sum, topic) => sum + topic.practiceProgress, 0) / examTopics.length) : 0);
+    const weekly = resolveStudyPlan(data.plans[subjectId], data.preferences);
+    const studyDaysLeft = days >= 0 ? countStudyDaysUntil(exam.date, weekly.studyDays) : 0;
+    const dateLabel = keyToDate(exam.date).toLocaleDateString(locale, { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' });
 
-  // =================================
-  // MODAL CONTENT
-  // =================================
-
-  function renderModalContent() {
-    // =================================
-    // EDIT
-    // =================================
-
-    if (
-      modalView === 'edit'
-    ) {
-      return (
-        <>
-          <View
-            style={
-              styles.modalHandle
-            }
-          />
-
-          <Text
-            style={
-              styles.modalTitle
-            }
-          >
-            {exam
-              ? 'Edit exam'
-              : 'Set up exam'}
-          </Text>
-
-          <Text
-            style={
-              styles.modalSubtitle
-            }
-          >
-            Choose your exam date,
-            type and topics.
-          </Text>
-
-          {/* DATE */}
-
-          <Pressable
-            style={
-              styles.settingRow
-            }
-            onPress={() =>
-              setModalView(
-                'date',
-              )
-            }
-          >
-            <View
-              style={
-                styles.settingContent
-              }
-            >
-              <Text
-                style={
-                  styles.settingLabel
-                }
-              >
-                Exam date
-              </Text>
-
-              <Text
-                style={
-                  styles.settingValue
-                }
-              >
-                {selectedDate.toLocaleDateString(
-                  'en-GB',
-                  {
-                    day: 'numeric',
-                    month: 'long',
-                    year: 'numeric',
-                  },
-                )}
-              </Text>
-            </View>
-
-            <Text
-              style={
-                styles.settingArrow
-              }
-            >
-              ›
-            </Text>
-          </Pressable>
-
-          {/* TYPE */}
-
-          <Pressable
-            style={
-              styles.settingRow
-            }
-            onPress={() =>
-              setModalView(
-                'type',
-              )
-            }
-          >
-            <View
-              style={
-                styles.settingContent
-              }
-            >
-              <Text
-                style={
-                  styles.settingLabel
-                }
-              >
-                Exam type
-              </Text>
-
-              <Text
-                style={
-                  styles.settingValue
-                }
-              >
-                {selectedType}
-              </Text>
-            </View>
-
-            <Text
-              style={
-                styles.settingArrow
-              }
-            >
-              ›
-            </Text>
-          </Pressable>
-
-          {/* TOPICS */}
-
-          <Pressable
-            style={
-              styles.settingRow
-            }
-            onPress={() =>
-              openTopicsPicker(
-                true,
-              )
-            }
-          >
-            <View
-              style={
-                styles.settingContent
-              }
-            >
-              <Text
-                style={
-                  styles.settingLabel
-                }
-              >
-                Topics included
-              </Text>
-
-              <Text
-                style={
-                  styles.settingValue
-                }
-              >
-                {selectedTopicIds.length ===
-                0
-                  ? 'No topics selected'
-                  : `${selectedTopicIds.length} ${
-                      selectedTopicIds.length ===
-                      1
-                        ? 'topic'
-                        : 'topics'
-                    } selected`}
-              </Text>
-            </View>
-
-            <Text
-              style={
-                styles.settingArrow
-              }
-            >
-              ›
-            </Text>
-          </Pressable>
-
-          {/* BUTTONS */}
-
-          <View
-            style={
-              styles.modalButtons
-            }
-          >
-            <Pressable
-              style={
-                styles.cancelButton
-              }
-              onPress={
-                closeModal
-              }
-            >
-              <Text
-                style={
-                  styles.cancelButtonText
-                }
-              >
-                Cancel
-              </Text>
-            </Pressable>
-
-            <Pressable
-              style={
-                styles.saveButton
-              }
-              onPress={
-                saveChanges
-              }
-            >
-              <Text
-                style={
-                  styles.saveButtonText
-                }
-              >
-                Done
-              </Text>
-            </Pressable>
-          </View>
-        </>
-      );
+    let pace = '';
+    if (days >= 0 && examTopics.length > 0) {
+      if (remaining === 0) pace = L('Every exam topic is completed. Keep them fresh with short revisions.', 'Alle eksamenstemaene er fullført. Hold dem ved like med korte repetisjoner.');
+      else if (studyDaysLeft === 0) pace = L(`${remaining} ${remaining === 1 ? 'topic is' : 'topics are'} not completed and there are no study days left in your plan.`, `${remaining} ${remaining === 1 ? 'tema er' : 'temaer er'} ikke fullført, og det er ingen studiedager igjen i planen.`);
+      else if (remaining > studyDaysLeft) pace = L(`${remaining} topics left and ${studyDaysLeft} study days: about ${Math.ceil(remaining / studyDaysLeft)} topics per study day.`, `${remaining} temaer igjen og ${studyDaysLeft} studiedager: omtrent ${Math.ceil(remaining / studyDaysLeft)} temaer per studiedag.`);
+      else pace = L(`${remaining} ${remaining === 1 ? 'topic' : 'topics'} left and ${studyDaysLeft} study days: about ${Math.floor(studyDaysLeft / remaining)} study ${Math.floor(studyDaysLeft / remaining) === 1 ? 'day' : 'days'} per topic.`, `${remaining} ${remaining === 1 ? 'tema' : 'temaer'} igjen og ${studyDaysLeft} studiedager: omtrent ${Math.floor(studyDaysLeft / remaining)} ${Math.floor(studyDaysLeft / remaining) === 1 ? 'studiedag' : 'studiedager'} per tema.`);
     }
 
-    // =================================
-    // DATE
-    // =================================
+    body = (
+      <>
+        <View style={[p.card, styles.countdown]}>
+          <Text style={styles.eyebrow}>{days < 0 ? L('Exam date has passed', 'Eksamensdatoen er passert') : days === 0 ? L('Exam day', 'Eksamensdag') : L('Days until the exam', 'Dager til eksamen')}</Text>
+          <Text style={styles.big}>{days < 0 ? '–' : days === 0 ? L('Today', 'I dag') : days}</Text>
+          <Text style={styles.date}>{dateLabel}</Text>
+          <Text style={p.chip}>{typeLabel(exam.type)}</Text>
+        </View>
 
-    if (
-      modalView === 'date'
-    ) {
-      return (
-        <>
-          <View
-            style={
-              styles.modalHandle
-            }
-          />
-
-          <View
-            style={
-              styles.modalHeaderRow
-            }
-          >
-            <Pressable
-              style={
-                styles.modalBackButton
-              }
-              onPress={() =>
-                setModalView(
-                  'edit',
-                )
-              }
-            >
-              <Text
-                style={
-                  styles.modalBackText
-                }
-              >
-                ‹
-              </Text>
-            </Pressable>
-
-            <Text
-              style={
-                styles.modalTitle
-              }
-            >
-              Exam date
-            </Text>
-
-            <View
-              style={
-                styles.modalHeaderSpacer
-              }
-            />
-          </View>
-
-          <Text
-            style={
-              styles.modalSubtitle
-            }
-          >
-            Select the date of your
-            examination.
-          </Text>
-
-          {renderCalendar()}
-
-          <View
-            style={
-              styles.selectedDatePreview
-            }
-          >
-            <Text
-              style={
-                styles.selectedDateLabel
-              }
-            >
-              Selected date
-            </Text>
-
-            <Text
-              style={
-                styles.selectedDateValue
-              }
-            >
-              {selectedDate.toLocaleDateString(
-                'en-GB',
-                {
-                  day: 'numeric',
-                  month: 'long',
-                  year: 'numeric',
-                },
-              )}
-            </Text>
-          </View>
-
-          <Pressable
-            style={
-              styles.fullButton
-            }
-            onPress={() =>
-              setModalView(
-                'edit',
-              )
-            }
-          >
-            <Text
-              style={
-                styles.fullButtonText
-              }
-            >
-              Done
-            </Text>
-          </Pressable>
-        </>
-      );
-    }
-
-    // =================================
-    // TYPE
-    // =================================
-
-    if (
-      modalView === 'type'
-    ) {
-      return (
-        <>
-          <View
-            style={
-              styles.modalHandle
-            }
-          />
-
-          <View
-            style={
-              styles.modalHeaderRow
-            }
-          >
-            <Pressable
-              style={
-                styles.modalBackButton
-              }
-              onPress={() =>
-                setModalView(
-                  'edit',
-                )
-              }
-            >
-              <Text
-                style={
-                  styles.modalBackText
-                }
-              >
-                ‹
-              </Text>
-            </Pressable>
-
-            <Text
-              style={
-                styles.modalTitle
-              }
-            >
-              Exam type
-            </Text>
-
-            <View
-              style={
-                styles.modalHeaderSpacer
-              }
-            />
-          </View>
-
-          <Text
-            style={
-              styles.modalSubtitle
-            }
-          >
-            Choose the type of
-            examination.
-          </Text>
-
-          <ScrollView
-            style={
-              styles.typeList
-            }
-            showsVerticalScrollIndicator={
-              false
-            }
-          >
-            {examTypes.map(
-              (type) => {
-                const selected =
-                  selectedType ===
-                  type;
-
-                return (
-                  <Pressable
-                    key={type}
-                    style={[
-                      styles.option,
-                      selected &&
-                        styles.optionSelected,
-                    ]}
-                    onPress={() => {
-                      setSelectedType(
-                        type,
-                      );
-
-                      setModalView(
-                        'edit',
-                      );
-                    }}
-                  >
-                    <Text
-                      style={[
-                        styles.optionText,
-                        selected &&
-                          styles.optionTextSelected,
-                      ]}
-                    >
-                      {type}
-                    </Text>
-
-                    {selected && (
-                      <Text
-                        style={
-                          styles.check
-                        }
-                      >
-                        ✓
-                      </Text>
-                    )}
-                  </Pressable>
-                );
-              },
-            )}
-          </ScrollView>
-        </>
-      );
-    }
-
-    // =================================
-    // TOPICS
-    // =================================
-
-    if (
-      modalView === 'topics'
-    ) {
-      return (
-        <>
-          <View
-            style={
-              styles.modalHandle
-            }
-          />
-
-          <View
-            style={
-              styles.modalHeaderRow
-            }
-          >
-            <Pressable
-              style={
-                styles.modalBackButton
-              }
-              onPress={() => {
-                if (
-                  topicsReturnToEdit
-                ) {
-                  setModalView(
-                    'edit',
-                  );
-                } else {
-                  closeModal();
-                }
-              }}
-            >
-              <Text
-                style={
-                  styles.modalBackText
-                }
-              >
-                ‹
-              </Text>
-            </Pressable>
-
-            <Text
-              style={
-                styles.modalTitle
-              }
-            >
-              Topics included
-            </Text>
-
-            <View
-              style={
-                styles.modalHeaderSpacer
-              }
-            />
-          </View>
-
-          <Text
-            style={
-              styles.modalSubtitle
-            }
-          >
-            Select all topics that are
-            part of this exam.
-          </Text>
-
-          {topics.length ===
-          0 ? (
-            <View
-              style={
-                styles.noTopicsContainer
-              }
-            >
-              <Text
-                style={
-                  styles.noTopicsEmoji
-                }
-              >
-                📚
-              </Text>
-
-              <Text
-                style={
-                  styles.noTopicsTitle
-                }
-              >
-                No topics yet
-              </Text>
-
-              <Text
-                style={
-                  styles.noTopicsText
-                }
-              >
-                Add topics to this subject
-                before selecting them for
-                the exam.
-              </Text>
-
-              <Pressable
-                style={
-                  styles.fullButton
-                }
-                onPress={() => {
-                  closeModal();
-
-                  router.push({
-                    pathname:
-                      '/subject/topics',
-
-                    params: {
-                      id:
-                        subjectId ??
-                        '',
-                    },
-                  });
-                }}
-              >
-                <Text
-                  style={
-                    styles.fullButtonText
-                  }
-                >
-                  Add topics
-                </Text>
-              </Pressable>
+        {days >= 0 && examTopics.length > 0 ? (
+          <View style={p.card}>
+            <View style={p.cardHeader}>
+              <Text style={p.cardTitle}>{L('Exam readiness', 'Klar til eksamen')}</Text>
+              <Text style={styles.percent}>{readiness}%</Text>
             </View>
-          ) : (
-            <>
-              <ScrollView
-                style={
-                  styles.topicSelectionList
-                }
-                showsVerticalScrollIndicator={
-                  false
-                }
-              >
-                {topics.map(
-                  (topic) => {
-                    const selected =
-                      selectedTopicIds.includes(
-                        topic.id,
-                      );
+            <ProgressBar value={readiness} color={palette.accent} trackColor={palette.track} height={9} />
+            <View style={styles.stats}>
+              <View style={styles.stat}><Text style={styles.statValue}>{completed}/{examTopics.length}</Text><Text style={styles.statLabel}>{L('Topics completed', 'Temaer fullført')}</Text></View>
+              <View style={styles.statDivider} />
+              <View style={styles.stat}><Text style={styles.statValue}>{studyDaysLeft}</Text><Text style={styles.statLabel}>{L('Study days left', 'Studiedager igjen')}</Text></View>
+            </View>
+            {pace ? <View style={[p.inset, p.row]}><StudyIcon name="sparkles" size={17} color={palette.accent} /><Text style={[p.body, p.grow]}>{pace}</Text></View> : null}
+            <Pressable accessibilityRole="button" onPress={() => router.push({ pathname: '/subject/study-plan', params: routeParams })} style={({ pressed }) => [p.outlineButton, pressed && p.pressed]}>
+              <Text style={p.outlineButtonText}>{L('Open study plan', 'Åpne studieplanen')}</Text>
+            </Pressable>
+          </View>
+        ) : null}
 
-                    return (
-                      <Pressable
-                        key={topic.id}
-                        style={[
-                          styles.topicOption,
-                          selected &&
-                            styles.topicOptionSelected,
-                        ]}
-                        onPress={() =>
-                          toggleTopic(
-                            topic.id,
-                          )
-                        }
-                      >
-                        <View
-                          style={[
-                            styles.checkbox,
-                            selected &&
-                              styles.checkboxSelected,
-                          ]}
-                        >
-                          {selected && (
-                            <Text
-                              style={
-                                styles.checkboxCheck
-                              }
-                            >
-                              ✓
-                            </Text>
-                          )}
-                        </View>
-
-                        <Text
-                          style={[
-                            styles.topicOptionText,
-                            selected &&
-                              styles.topicOptionTextSelected,
-                          ]}
-                        >
-                          {
-                            topic.name
-                          }
-                        </Text>
-                      </Pressable>
-                    );
-                  },
-                )}
-              </ScrollView>
-
-              <Pressable
-                style={
-                  styles.fullButton
-                }
-                onPress={
-                  finishTopicsPicker
-                }
-              >
-                <Text
-                  style={
-                    styles.fullButtonText
-                  }
-                >
-                  Done
-                </Text>
-              </Pressable>
-            </>
-          )}
-        </>
-      );
-    }
-
-    return null;
-  }
-
-  // =================================
-  // LOADING
-  // =================================
-
-  if (loading) {
-    return (
-      <SafeAreaView
-        style={
-          styles.container
-        }
-      >
-        <Stack.Screen
-          options={{
-            headerShown: false,
-          }}
+        <SectionHeader
+          title={exam.topicIds.length > 0 ? L(`Exam topics (${examTopics.length})`, `Eksamenstemaer (${examTopics.length})`) : L(`All topics count (${examTopics.length})`, `Alle temaer teller (${examTopics.length})`)}
+          action={L('Edit', 'Endre')}
+          onAction={openEditor}
         />
+        {examTopics.length === 0 ? (
+          <View style={[p.card, p.empty]}>
+            <Text style={[p.body, studyStyles.centered]}>{L('This subject has no topics yet.', 'Emnet har ingen temaer ennå.')}</Text>
+            <Pressable accessibilityRole="button" onPress={() => router.push({ pathname: '/subject/topics', params: routeParams })} style={({ pressed }) => [p.button, styles.wide, { backgroundColor: palette.accent }, pressed && p.pressed]}>
+              <Text style={p.buttonText}>{L('Add topics', 'Legg til temaer')}</Text>
+            </Pressable>
+          </View>
+        ) : examTopics.map((topic) => (
+          <Pressable key={topic.id} accessibilityRole="button" accessibilityLabel={`${topic.name}, ${topic.practiceProgress}%`} onPress={() => router.push({ pathname: '/subject/topic/[id]', params: { id: String(topic.id), name: topic.name, subjectId } })} style={({ pressed }) => [styles.topicRow, pressed && p.pressed]}>
+            <TopicRing progress={topic.practiceProgress} completed={topic.status === 'completed'} />
+            <View style={p.grow}>
+              <Text style={styles.topicName} numberOfLines={1}>{topic.name}</Text>
+              <Text style={styles.topicDetail}>
+                {topic.status === 'completed' ? L('Completed', 'Fullført') : topic.status === 'in_progress' ? L('In progress', 'Påbegynt') : L('Not started', 'Ikke startet')} · {topic.practiceProgress}%
+                {topic.fadedPoints > 0 ? ` · ${L('fading', 'falmer')}` : ''}
+              </Text>
+            </View>
+            <StudyIcon name="chevron" size={12} color={ink.muted} />
+          </Pressable>
+        ))}
+        {examTopics.length > 1 ? <Text style={p.small}>{L('The topics that need the most work are shown first.', 'Temaene som trenger mest arbeid vises først.')}</Text> : null}
 
-        <Text
-          style={
-            styles.loadingText
-          }
-        >
-          Loading exam...
-        </Text>
-      </SafeAreaView>
+        <Pressable accessibilityRole="button" onPress={openEditor} style={({ pressed }) => [p.button, styles.buttonRow, { backgroundColor: palette.accent }, pressed && p.pressed]}>
+          <StudyIcon name="pencil" size={15} color="#FFFFFF" /><Text style={p.buttonText}>{L('Edit exam', 'Endre eksamen')}</Text>
+        </Pressable>
+        <Pressable accessibilityRole="button" onPress={confirmDelete} style={({ pressed }) => [styles.deleteButton, pressed && p.pressed]}>
+          <Text style={styles.deleteText}>{L('Delete exam', 'Slett eksamen')}</Text>
+        </Pressable>
+      </>
     );
   }
 
-  // =================================
-  // MAIN SCREEN
-  // =================================
-
   return (
-    <SafeAreaView
-      style={
-        styles.container
-      }
-    >
-      <Stack.Screen
-        options={{
-          headerShown: false,
-        }}
-      />
-
-      <PullToRefreshScrollView
-        onRefresh={() => loadData(false)}
-        contentContainerStyle={
-          styles.scrollContent
-        }
-        showsVerticalScrollIndicator={
-          false
-        }
-      >
-        {/* BACK */}
-
-        <Pressable
-          style={
-            styles.backButton
-          }
-          onPress={() =>
-            router.back()
-          }
-        >
-          <Text
-            style={
-              styles.backText
-            }
-          >
-            ← Back
-          </Text>
-        </Pressable>
-
-        {/* HEADER */}
-
-        <Text
-          style={
-            styles.title
-          }
-        >
-          Exam
-        </Text>
-
-        <Text
-          style={
-            styles.subtitle
-          }
-        >
-          {subjectName
-            ? `${subjectName} exam details`
-            : 'Manage your exam details.'}
-        </Text>
-
-        {/* NO EXAM */}
-
-        {!exam ? (
-          <View
-            style={
-              styles.noExamCard
-            }
-          >
-            <View
-              style={
-                styles.noExamIcon
-              }
-            >
-              <Text
-                style={
-                  styles.noExamEmoji
-                }
-              >
-                📝
-              </Text>
-            </View>
-
-            <Text
-              style={
-                styles.noExamTitle
-              }
-            >
-              No exam set
-            </Text>
-
-            <Text
-              style={
-                styles.noExamText
-              }
-            >
-              Add your exam date,
-              exam type and the
-              topics included in the
-              exam.
-            </Text>
-
-            <Pressable
-              style={
-                styles.primaryButton
-              }
-              onPress={
-                openEdit
-              }
-            >
-              <Text
-                style={
-                  styles.primaryButtonText
-                }
-              >
-                + Set up exam
-              </Text>
-            </Pressable>
-          </View>
-        ) : (
-          <>
-            {/* COUNTDOWN */}
-
-            <View
-              style={
-                styles.countdownCard
-              }
-            >
-              <Text
-                style={
-                  styles.countdownLabel
-                }
-              >
-                {daysUntilExam !==
-                  null &&
-                daysUntilExam <
-                  0
-                  ? 'Exam date passed'
-                  : daysUntilExam ===
-                      0
-                    ? 'Exam day'
-                    : 'Days until exam'}
-              </Text>
-
-              <Text
-                style={
-                  styles.countdownNumber
-                }
-              >
-                {daysUntilExam !==
-                  null &&
-                daysUntilExam >=
-                  0
-                  ? daysUntilExam
-                  : '—'}
-              </Text>
-
-              {daysUntilExam !==
-                null &&
-                daysUntilExam >
-                  0 && (
-                  <Text
-                    style={
-                      styles.countdownSmall
-                    }
-                  >
-                    days remaining
-                  </Text>
-                )}
-            </View>
-
-            {/* EXAM DATE */}
-
-            <View
-              style={
-                styles.infoCard
-              }
-            >
-              <View
-                style={
-                  styles.infoIconBox
-                }
-              >
-                <Text
-                  style={
-                    styles.infoIcon
-                  }
-                >
-                  📅
-                </Text>
-              </View>
-
-              <View
-                style={
-                  styles.infoContent
-                }
-              >
-                <Text
-                  style={
-                    styles.infoLabel
-                  }
-                >
-                  Exam date
-                </Text>
-
-                <Text
-                  style={
-                    styles.infoValue
-                  }
-                >
-                  {formatDate(
-                    exam.date,
-                  )}
-                </Text>
-              </View>
-            </View>
-
-            {/* EXAM TYPE */}
-
-            <View
-              style={
-                styles.infoCard
-              }
-            >
-              <View
-                style={
-                  styles.infoIconBox
-                }
-              >
-                <Text
-                  style={
-                    styles.infoIcon
-                  }
-                >
-                  📝
-                </Text>
-              </View>
-
-              <View
-                style={
-                  styles.infoContent
-                }
-              >
-                <Text
-                  style={
-                    styles.infoLabel
-                  }
-                >
-                  Exam type
-                </Text>
-
-                <Text
-                  style={
-                    styles.infoValue
-                  }
-                >
-                  {exam.type}
-                </Text>
-              </View>
-            </View>
-
-            {/* TOPICS INCLUDED */}
-
-            <Pressable
-              style={
-                styles.infoCard
-              }
-              onPress={() =>
-                openTopicsPicker(
-                  false,
-                )
-              }
-            >
-              <View
-                style={
-                  styles.infoIconBox
-                }
-              >
-                <Text
-                  style={
-                    styles.infoIcon
-                  }
-                >
-                  📚
-                </Text>
-              </View>
-
-              <View
-                style={
-                  styles.infoContent
-                }
-              >
-                <Text
-                  style={
-                    styles.infoLabel
-                  }
-                >
-                  Topics included
-                </Text>
-
-                {selectedTopicNames.length ===
-                0 ? (
-                  <Text
-                    style={
-                      styles.infoMuted
-                    }
-                  >
-                    No topics selected
-                  </Text>
-                ) : (
-                  <>
-                    <Text
-                      style={
-                        styles.infoValue
-                      }
-                    >
-                      {
-                        selectedTopicNames.length
-                      }{' '}
-                      {selectedTopicNames.length ===
-                      1
-                        ? 'topic'
-                        : 'topics'}
-                    </Text>
-
-                    <Text
-                      style={
-                        styles.topicPreview
-                      }
-                      numberOfLines={
-                        2
-                      }
-                    >
-                      {selectedTopicNames.join(
-                        ' • ',
-                      )}
-                    </Text>
-                  </>
-                )}
-              </View>
-
-              <Text
-                style={
-                  styles.arrow
-                }
-              >
-                ›
-              </Text>
-            </Pressable>
-
-            {/* EDIT */}
-
-            <Pressable
-              style={
-                styles.editCard
-              }
-              onPress={
-                openEdit
-              }
-            >
-              <Text
-                style={
-                  styles.editIcon
-                }
-              >
-                ✏️
-              </Text>
-
-              <Text
-                style={
-                  styles.editText
-                }
-              >
-                Edit exam
-              </Text>
-
-              <Text
-                style={
-                  styles.arrow
-                }
-              >
-                ›
-              </Text>
-            </Pressable>
-
-            {/* DELETE */}
-
-            <Pressable
-              style={
-                styles.deleteCard
-              }
-              onPress={
-                deleteExam
-              }
-            >
-              <Text
-                style={
-                  styles.deleteIcon
-                }
-              >
-                🗑️
-              </Text>
-
-              <Text
-                style={
-                  styles.deleteText
-                }
-              >
-                Delete exam
-              </Text>
-
-              <Text
-                style={
-                  styles.arrowDelete
-                }
-              >
-                ›
-              </Text>
-            </Pressable>
-          </>
-        )}
-      </PullToRefreshScrollView>
-
-      {/* =================================
-          ONE SINGLE MODAL
-          ================================= */}
-
-      <Modal
-        visible={
-          modalView !== null
-        }
-        transparent
-        animationType="slide"
-        statusBarTranslucent={
-          Platform.OS ===
-          'android'
-        }
-        onRequestClose={() => {
-          if (
-            modalView ===
-            'edit'
-          ) {
-            closeModal();
-          } else if (
-            modalView ===
-              'date' ||
-            modalView ===
-              'type'
-          ) {
-            setModalView(
-              'edit',
-            );
-          } else if (
-            modalView ===
-            'topics'
-          ) {
-            if (
-              topicsReturnToEdit
-            ) {
-              setModalView(
-                'edit',
-              );
-            } else {
-              closeModal();
-            }
-          }
-        }}
-      >
-        <View
-          style={
-            styles.modalOverlay
-          }
-        >
-          <View
-            style={
-              styles.modalContainer
-            }
-          >
-            {renderModalContent()}
-          </View>
+    <SafeAreaView style={ui.container} edges={['top']}>
+      <Stack.Screen options={{ headerShown: false }} />
+      <PullToRefreshScrollView contentContainerStyle={studyStyles.content} showsVerticalScrollIndicator={false} onRefresh={reload}>
+        <ScreenBar backLabel={L('Back', 'Tilbake')} />
+        <View>
+          <Text style={styles.title} accessibilityRole="header">{L('Exam', 'Eksamen')}</Text>
+          <Text style={styles.subtitle} numberOfLines={1}>{subjectName}</Text>
         </View>
-      </Modal>
+        {body}
+      </PullToRefreshScrollView>
+      {editor}
     </SafeAreaView>
   );
 }
 
-// =================================
-// STYLES
-// =================================
-
-const styles =
-  StyleSheet.create({
-    container: {
-      flex: 1,
-      backgroundColor:
-        appColor('#F7FBFE', 'background'),
-    },
-
-    scrollContent: {
-      paddingHorizontal: 20,
-      paddingBottom: 40,
-    },
-
-    loadingText: {
-      marginTop: 40,
-      textAlign: 'center',
-      color: appColor('#8494A0', 'text'),
-    },
-
-    backButton: {
-      marginTop: 12,
-      marginBottom: 24,
-    },
-
-    backText: {
-      fontSize: 15,
-      fontWeight: '600',
-      color: appColor('#43A5D1', 'text'),
-    },
-
-    title: {
-      fontSize: 30,
-      fontWeight: '800',
-      color: appColor('#17324D', 'text'),
-    },
-
-    subtitle: {
-      fontSize: 15,
-      color: appColor('#7A8B99', 'text'),
-      marginTop: 8,
-      marginBottom: 26,
-    },
-
-    countdownCard: {
-      backgroundColor:
-        appColor('#DFF4FF', 'background'),
-      borderRadius: 24,
-      padding: 24,
-      alignItems: 'center',
-      marginBottom: 16,
-    },
-
-    countdownLabel: {
-      fontSize: 14,
-      fontWeight: '600',
-      color: appColor('#56829A', 'text'),
-    },
-
-    countdownNumber: {
-      fontSize: 58,
-      fontWeight: '800',
-      color: appColor('#318DBA', 'text'),
-      marginTop: 4,
-    },
-
-    countdownSmall: {
-      fontSize: 13,
-      color: appColor('#6D8A9A', 'text'),
-      marginTop: -4,
-    },
-
-    infoCard: {
-      backgroundColor:
-        appColor('#FFFFFF', 'background'),
-      borderRadius: 20,
-      padding: 17,
-      marginBottom: 12,
-      flexDirection:
-        'row',
-      alignItems: 'center',
-    },
-
-    infoIconBox: {
-      width: 48,
-      height: 48,
-      borderRadius: 14,
-      backgroundColor:
-        appColor('#E3F5FF', 'background'),
-      justifyContent:
-        'center',
-      alignItems:
-        'center',
-    },
-
-    infoIcon: {
-      fontSize: 22,
-    },
-
-    infoContent: {
-      flex: 1,
-      marginLeft: 14,
-    },
-
-    infoLabel: {
-      fontSize: 12,
-      fontWeight: '600',
-      color: appColor('#8A9BA5', 'text'),
-    },
-
-    infoValue: {
-      fontSize: 16,
-      fontWeight: '700',
-      color: appColor('#17324D', 'text'),
-      marginTop: 4,
-    },
-
-    infoMuted: {
-      fontSize: 14,
-      color: appColor('#9AAAB5', 'text'),
-      marginTop: 4,
-    },
-
-    topicPreview: {
-      fontSize: 12,
-      color: appColor('#7A8F9C', 'text'),
-      marginTop: 5,
-    },
-
-    arrow: {
-      fontSize: 28,
-      fontWeight: '300',
-      color: appColor('#9AB5C4', 'text'),
-      marginLeft: 8,
-    },
-
-    editCard: {
-      backgroundColor:
-        appColor('#EAF7FD', 'background'),
-      borderRadius: 18,
-      padding: 17,
-      marginTop: 8,
-      flexDirection:
-        'row',
-      alignItems:
-        'center',
-    },
-
-    editIcon: {
-      fontSize: 19,
-    },
-
-    editText: {
-      flex: 1,
-      fontSize: 15,
-      fontWeight: '700',
-      color: appColor('#318DBA', 'text'),
-      marginLeft: 12,
-    },
-
-    deleteCard: {
-      backgroundColor:
-        appColor('#FFF4F4', 'background'),
-      borderRadius: 18,
-      padding: 17,
-      marginTop: 10,
-      flexDirection:
-        'row',
-      alignItems:
-        'center',
-    },
-
-    deleteIcon: {
-      fontSize: 19,
-    },
-
-    deleteText: {
-      flex: 1,
-      fontSize: 15,
-      fontWeight: '700',
-      color: appColor('#D96B6B', 'text'),
-      marginLeft: 12,
-    },
-
-    arrowDelete: {
-      fontSize: 28,
-      fontWeight: '300',
-      color: appColor('#D99A9A', 'text'),
-    },
-
-    noExamCard: {
-      backgroundColor:
-        appColor('#FFFFFF', 'background'),
-      borderRadius: 24,
-      padding: 28,
-      alignItems:
-        'center',
-      marginTop: 8,
-    },
-
-    noExamIcon: {
-      width: 68,
-      height: 68,
-      borderRadius: 22,
-      backgroundColor:
-        appColor('#E3F5FF', 'background'),
-      justifyContent:
-        'center',
-      alignItems:
-        'center',
-    },
-
-    noExamEmoji: {
-      fontSize: 30,
-    },
-
-    noExamTitle: {
-      fontSize: 21,
-      fontWeight: '800',
-      color: appColor('#17324D', 'text'),
-      marginTop: 18,
-    },
-
-    noExamText: {
-      fontSize: 14,
-      color: appColor('#8494A0', 'text'),
-      textAlign:
-        'center',
-      lineHeight: 21,
-      marginTop: 8,
-    },
-
-    primaryButton: {
-      backgroundColor:
-        appColor('#4AA9D8', 'background'),
-      paddingHorizontal: 20,
-      paddingVertical: 14,
-      borderRadius: 15,
-      marginTop: 20,
-    },
-
-    primaryButtonText: {
-      color: appColor('#FFFFFF', 'text'),
-      fontSize: 15,
-      fontWeight: '700',
-    },
-
-    // =================================
-    // MODAL
-    // =================================
-
-    modalOverlay: {
-      flex: 1,
-      backgroundColor:
-        'rgba(20, 45, 65, 0.25)',
-      justifyContent:
-        'flex-end',
-    },
-
-    modalContainer: {
-      backgroundColor:
-        appColor('#FFFFFF', 'background'),
-      borderTopLeftRadius: 28,
-      borderTopRightRadius: 28,
-      padding: 24,
-      paddingBottom:
-        Platform.OS === 'ios'
-          ? 36
-          : 28,
-      maxHeight: '92%',
-    },
-
-    modalHandle: {
-      width: 42,
-      height: 5,
-      borderRadius: 3,
-      backgroundColor:
-        appColor('#D8E2E8', 'background'),
-      alignSelf:
-        'center',
-      marginBottom: 22,
-    },
-
-    modalHeaderRow: {
-      flexDirection:
-        'row',
-      alignItems:
-        'center',
-      justifyContent:
-        'space-between',
-    },
-
-    modalBackButton: {
-      width: 40,
-      height: 40,
-      borderRadius: 14,
-      backgroundColor:
-        appColor('#F2F7F9', 'background'),
-      alignItems:
-        'center',
-      justifyContent:
-        'center',
-    },
-
-    modalBackText: {
-      fontSize: 32,
-      lineHeight: 32,
-      color: appColor('#4AA9D8', 'text'),
-      fontWeight: '400',
-      marginTop: -3,
-    },
-
-    modalHeaderSpacer: {
-      width: 40,
-    },
-
-    modalTitle: {
-      fontSize: 24,
-      fontWeight: '800',
-      color: appColor('#17324D', 'text'),
-    },
-
-    modalSubtitle: {
-      fontSize: 14,
-      color: appColor('#8494A0', 'text'),
-      marginTop: 7,
-      lineHeight: 20,
-      marginBottom: 18,
-    },
-
-    settingRow: {
-      backgroundColor:
-        appColor('#F5F9FB', 'background'),
-      borderRadius: 16,
-      padding: 16,
-      marginTop: 10,
-      flexDirection:
-        'row',
-      alignItems:
-        'center',
-    },
-
-    settingContent: {
-      flex: 1,
-    },
-
-    settingLabel: {
-      fontSize: 12,
-      fontWeight: '600',
-      color: appColor('#8A9BA5', 'text'),
-    },
-
-    settingValue: {
-      fontSize: 16,
-      fontWeight: '700',
-      color: appColor('#17324D', 'text'),
-      marginTop: 4,
-    },
-
-    settingArrow: {
-      fontSize: 25,
-      color: appColor('#9AB5C4', 'text'),
-    },
-
-    modalButtons: {
-      flexDirection:
-        'row',
-      marginTop: 20,
-    },
-
-    cancelButton: {
-      flex: 1,
-      backgroundColor:
-        appColor('#F2F6F8', 'background'),
-      paddingVertical: 14,
-      borderRadius: 15,
-      alignItems:
-        'center',
-      marginRight: 6,
-    },
-
-    cancelButtonText: {
-      fontSize: 14,
-      fontWeight: '700',
-      color: appColor('#718592', 'text'),
-    },
-
-    saveButton: {
-      flex: 1,
-      backgroundColor:
-        appColor('#4AA9D8', 'background'),
-      paddingVertical: 14,
-      borderRadius: 15,
-      alignItems:
-        'center',
-      marginLeft: 6,
-    },
-
-    saveButtonText: {
-      fontSize: 14,
-      fontWeight: '700',
-      color: appColor('#FFFFFF', 'text'),
-    },
-
-    // =================================
-    // CALENDAR
-    // =================================
-
-    calendar: {
-      backgroundColor:
-        appColor('#F7FBFD', 'background'),
-      borderRadius: 20,
-      padding: 16,
-      marginTop: 4,
-    },
-
-    calendarHeader: {
-      flexDirection:
-        'row',
-      alignItems:
-        'center',
-      justifyContent:
-        'space-between',
-      marginBottom: 18,
-    },
-
-    calendarMonthTitle: {
-      fontSize: 17,
-      fontWeight: '800',
-      color: appColor('#17324D', 'text'),
-    },
-
-    monthArrow: {
-      width: 40,
-      height: 40,
-      borderRadius: 13,
-      backgroundColor:
-        appColor('#E3F5FF', 'background'),
-      alignItems:
-        'center',
-      justifyContent:
-        'center',
-    },
-
-    monthArrowText: {
-      fontSize: 30,
-      lineHeight: 30,
-      color: appColor('#4AA9D8', 'text'),
-      marginTop: -3,
-    },
-
-    weekdayRow: {
-      flexDirection:
-        'row',
-      marginBottom: 8,
-    },
-
-    weekdayCell: {
-      width: '14.2857%',
-      alignItems:
-        'center',
-    },
-
-    weekdayText: {
-      fontSize: 12,
-      fontWeight: '700',
-      color: appColor('#8A9BA5', 'text'),
-    },
-
-    daysGrid: {
-      flexDirection:
-        'row',
-      flexWrap:
-        'wrap',
-    },
-
-    dayCell: {
-      width: '14.2857%',
-      height: 44,
-      alignItems:
-        'center',
-      justifyContent:
-        'center',
-      borderRadius: 12,
-      marginBottom: 3,
-    },
-
-    dayText: {
-      fontSize: 15,
-      fontWeight: '600',
-      color: appColor('#526775', 'text'),
-    },
-
-    selectedDay: {
-      backgroundColor:
-        appColor('#4AA9D8', 'background'),
-    },
-
-    selectedDayText: {
-      color: appColor('#FFFFFF', 'text'),
-      fontWeight: '800',
-    },
-
-    todayText: {
-      color: appColor('#318DBA', 'text'),
-      fontWeight: '800',
-    },
-
-    selectedDatePreview: {
-      backgroundColor:
-        appColor('#EAF7FD', 'background'),
-      borderRadius: 16,
-      padding: 14,
-      marginTop: 14,
-      flexDirection:
-        'row',
-      alignItems:
-        'center',
-      justifyContent:
-        'space-between',
-    },
-
-    selectedDateLabel: {
-      fontSize: 12,
-      fontWeight: '600',
-      color: appColor('#718592', 'text'),
-    },
-
-    selectedDateValue: {
-      fontSize: 14,
-      fontWeight: '800',
-      color: appColor('#318DBA', 'text'),
-    },
-
-    // =================================
-    // BUTTON
-    // =================================
-
-    fullButton: {
-      backgroundColor:
-        appColor('#4AA9D8', 'background'),
-      borderRadius: 16,
-      paddingVertical: 15,
-      alignItems:
-        'center',
-      marginTop: 18,
-    },
-
-    fullButtonText: {
-      color: appColor('#FFFFFF', 'text'),
-      fontSize: 15,
-      fontWeight: '700',
-    },
-
-    // =================================
-    // TYPE
-    // =================================
-
-    typeList: {
-      maxHeight: 360,
-    },
-
-    option: {
-      backgroundColor:
-        appColor('#F5F9FB', 'background'),
-      borderRadius: 15,
-      padding: 16,
-      marginBottom: 9,
-      flexDirection:
-        'row',
-      alignItems:
-        'center',
-    },
-
-    optionSelected: {
-      backgroundColor:
-        appColor('#E3F5FF', 'background'),
-    },
-
-    optionText: {
-      flex: 1,
-      fontSize: 15,
-      fontWeight: '600',
-      color: appColor('#526775', 'text'),
-    },
-
-    optionTextSelected: {
-      color: appColor('#318DBA', 'text'),
-    },
-
-    check: {
-      fontSize: 20,
-      fontWeight: '800',
-      color: appColor('#318DBA', 'text'),
-    },
-
-    // =================================
-    // TOPICS
-    // =================================
-
-    topicSelectionList: {
-      marginTop: 4,
-      maxHeight: 350,
-    },
-
-    topicOption: {
-      backgroundColor:
-        appColor('#F5F9FB', 'background'),
-      borderRadius: 15,
-      padding: 15,
-      marginBottom: 9,
-      flexDirection:
-        'row',
-      alignItems:
-        'center',
-    },
-
-    topicOptionSelected: {
-      backgroundColor:
-        appColor('#E3F5FF', 'background'),
-    },
-
-    checkbox: {
-      width: 25,
-      height: 25,
-      borderRadius: 8,
-      borderWidth: 2,
-      borderColor:
-        appColor('#C7D8E1', 'border'),
-      justifyContent:
-        'center',
-      alignItems:
-        'center',
-    },
-
-    checkboxSelected: {
-      backgroundColor:
-        appColor('#4AA9D8', 'background'),
-      borderColor:
-        appColor('#4AA9D8', 'border'),
-    },
-
-    checkboxCheck: {
-      color: appColor('#FFFFFF', 'text'),
-      fontSize: 15,
-      fontWeight: '800',
-    },
-
-    topicOptionText: {
-      flex: 1,
-      fontSize: 15,
-      fontWeight: '600',
-      color: appColor('#526775', 'text'),
-      marginLeft: 12,
-    },
-
-    topicOptionTextSelected: {
-      color: appColor('#318DBA', 'text'),
-      fontWeight: '700',
-    },
-
-    noTopicsContainer: {
-      alignItems:
-        'center',
-      paddingVertical: 20,
-    },
-
-    noTopicsEmoji: {
-      fontSize: 38,
-    },
-
-    noTopicsTitle: {
-      fontSize: 19,
-      fontWeight: '800',
-      color: appColor('#17324D', 'text'),
-      marginTop: 12,
-    },
-
-    noTopicsText: {
-      fontSize: 14,
-      color: appColor('#8494A0', 'text'),
-      textAlign:
-        'center',
-      lineHeight: 21,
-      marginTop: 7,
-    },
-  });
+const styles = StyleSheet.create({
+  title: { color: ink.primary, fontSize: 30, fontWeight: '800', letterSpacing: -0.4 },
+  subtitle: { color: ink.secondary, fontSize: 14, marginTop: 2 },
+  state: { alignItems: 'center', paddingVertical: 60 },
+  wide: { alignSelf: 'stretch' },
+  buttonRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8 },
+  countdown: { alignItems: 'center', gap: 6, paddingVertical: 22 },
+  eyebrow: { color: ink.muted, fontSize: 12, fontWeight: '600' },
+  big: { color: ink.primary, fontSize: 56, fontWeight: '800', letterSpacing: -1.5, lineHeight: 62 },
+  date: { color: ink.secondary, fontSize: 14, textAlign: 'center', marginBottom: 4 },
+  percent: { color: ink.primary, fontSize: 20, fontWeight: '800' },
+  stats: { flexDirection: 'row', alignItems: 'stretch' },
+  stat: { flex: 1, alignItems: 'center', gap: 3 },
+  statDivider: { width: StyleSheet.hairlineWidth, backgroundColor: appColor('#D8E6EC', 'border') },
+  statValue: { color: ink.primary, fontSize: 19, fontWeight: '800' },
+  statLabel: { color: ink.muted, fontSize: 11 },
+  topicRow: { flexDirection: 'row', alignItems: 'center', gap: 13, padding: 13, borderRadius: 18, backgroundColor: appColor('#FFFFFF', 'background'), borderWidth: 1, borderColor: appColor('#E7F0F4', 'border'), ...cardShadow },
+  topicName: { color: ink.primary, fontSize: 15, fontWeight: '700' },
+  topicDetail: { color: ink.muted, fontSize: 12, marginTop: 3 },
+  deleteButton: { minHeight: 44, alignItems: 'center', justifyContent: 'center' },
+  deleteText: { color: appColor('#A34338', 'text'), fontSize: 14, fontWeight: '700' },
+
+  modalMax: { maxHeight: '94%' },
+  modalScroll: { flexGrow: 1, justifyContent: 'flex-end' },
+  calendar: { borderRadius: 16, padding: 10, backgroundColor: appColor('#FFFFFF', 'background'), borderWidth: 1, borderColor: appColor('#E7F0F4', 'border'), ...cardShadow },
+  calendarTop: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 },
+  arrow: { width: 38, height: 38, borderRadius: 12, alignItems: 'center', justifyContent: 'center', backgroundColor: appColor('#F4F8FA', 'background') },
+  monthTitle: { color: ink.primary, fontSize: 15, fontWeight: '800', textTransform: 'capitalize' },
+  week: { flexDirection: 'row' },
+  weekday: { width: '14.2857%', textAlign: 'center', color: ink.muted, fontSize: 11, fontWeight: '700', paddingVertical: 4 },
+  days: { flexDirection: 'row', flexWrap: 'wrap' },
+  day: { width: '14.2857%', height: 40, alignItems: 'center', justifyContent: 'center' },
+  dayInner: { width: 34, height: 34, borderRadius: 17, alignItems: 'center', justifyContent: 'center' },
+  dayText: { color: ink.primary, fontSize: 14, fontWeight: '600' },
+  dayTextOn: { color: '#FFFFFF', fontWeight: '800' },
+  topicsTop: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
+  selectAll: { fontSize: 13, fontWeight: '800' },
+  check: { flexDirection: 'row', alignItems: 'center', gap: 12, minHeight: 42 },
+  box: { width: 22, height: 22, borderRadius: 7, alignItems: 'center', justifyContent: 'center', borderWidth: 1.5, borderColor: appColor('#B9CBD4', 'border') },
+  checkText: { flex: 1, color: ink.primary, fontSize: 15 },
+});

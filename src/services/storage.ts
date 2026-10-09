@@ -3,6 +3,7 @@ import { notifyLocalDataChanged } from './cloud-sync-state';
 import { reconcileExamReminders } from './study-reminder';
 
 import type {
+  TopicNotesByTopic,
   Subject,
   Topic,
   TopicsBySubject,
@@ -30,6 +31,7 @@ const STORAGE_KEYS = {
   flashcardReviews: 'medexam_flashcard_reviews',
   activeRecallQuestions: 'medexam_active_recall_questions',
   generatedQuizzes: 'medexam_generated_quizzes_by_topic',
+  topicNotes: 'medexam_topic_notes',
   preferences: 'medexam_study_preferences',
   aiPreferences: 'medexam_ai_preferences',
   appPreferences: 'medexam_app_preferences',
@@ -103,6 +105,11 @@ export const DEFAULT_APP_PREFERENCES: AppPreferences = {
 };
 
 const STORAGE_KEY_LIST = Object.values(STORAGE_KEYS);
+
+/** Every key that holds one account's study data and preferences, for switching accounts on a shared device. */
+export function getAccountStorageKeys(): string[] {
+  return [...STORAGE_KEY_LIST, RECOVERY_BACKUP_KEY];
+}
 const RECOVERY_BACKUP_KEY = 'medexam_recovery_backup';
 const writeLocks = new Map<string, Promise<unknown>>();
 
@@ -305,7 +312,7 @@ async function saveRecoverySnapshot(): Promise<void> {
 async function removeTopicStudyData(topicIds: Set<string>) {
   if (topicIds.size === 0) return [] as [string, string][];
 
-  const [activities, quizResults, flashcards, reviews, recall, generated, exams] = await Promise.all([
+  const [activities, quizResults, flashcards, reviews, recall, generated, exams, notes] = await Promise.all([
     getStudyActivity(),
     getQuizResults(),
     getFlashcards(),
@@ -313,6 +320,7 @@ async function removeTopicStudyData(topicIds: Set<string>) {
     getActiveRecallQuestionsByTopic(),
     getGeneratedQuizzesByTopic(),
     getExamsBySubject(),
+    getTopicNotesByTopic(),
   ]);
 
   const removedFlashcardIds = new Set(
@@ -321,6 +329,7 @@ async function removeTopicStudyData(topicIds: Set<string>) {
   for (const topicId of topicIds) {
     delete recall[topicId];
     delete generated[topicId];
+    delete notes[topicId];
   }
 
   for (const [subjectId, exam] of Object.entries(exams)) {
@@ -336,6 +345,7 @@ async function removeTopicStudyData(topicIds: Set<string>) {
     ),
     [STORAGE_KEYS.activeRecallQuestions]: recall,
     [STORAGE_KEYS.generatedQuizzes]: generated,
+    [STORAGE_KEYS.topicNotes]: notes,
     [STORAGE_KEYS.exams]: exams,
   };
 
@@ -799,6 +809,37 @@ export async function addGeneratedQuizForTopic(
 }
 
 /* ----------------------------------------
+   TOPIC NOTES
+---------------------------------------- */
+
+/** Longest course material kept per topic, the same limit the AI accepts. */
+export const MAX_TOPIC_NOTES_LENGTH = 20_000;
+
+/**
+ * Course material the student has saved on a topic (pasted notes or notes
+ * read from a PDF). The AI uses it whenever it makes flashcards, quizzes or
+ * Active Recall questions for that topic.
+ */
+export async function getTopicNotesByTopic(): Promise<TopicNotesByTopic> {
+  return read<TopicNotesByTopic>(STORAGE_KEYS.topicNotes, {});
+}
+
+export async function getTopicNotes(topicId: string | number): Promise<string> {
+  const notes = await getTopicNotesByTopic();
+  return notes[String(topicId)]?.text ?? '';
+}
+
+export async function saveTopicNotes(topicId: string | number, text: string): Promise<void> {
+  return withStorageLock(STORAGE_KEYS.topicNotes, async () => {
+    const notes = await getTopicNotesByTopic();
+    const trimmed = text.trim().slice(0, MAX_TOPIC_NOTES_LENGTH);
+    if (trimmed) notes[String(topicId)] = { text: trimmed, updatedAt: new Date().toISOString() };
+    else delete notes[String(topicId)];
+    await write(STORAGE_KEYS.topicNotes, notes);
+  });
+}
+
+/* ----------------------------------------
    BACKUP AND RESTORE
 ---------------------------------------- */
 
@@ -813,6 +854,7 @@ const DEFAULT_BACKUP_VALUES: Record<string, unknown> = {
   [STORAGE_KEYS.flashcardReviews]: [],
   [STORAGE_KEYS.activeRecallQuestions]: {},
   [STORAGE_KEYS.generatedQuizzes]: {},
+  [STORAGE_KEYS.topicNotes]: {},
   [STORAGE_KEYS.preferences]: DEFAULT_STUDY_PREFERENCES,
   [STORAGE_KEYS.aiPreferences]: DEFAULT_AI_PREFERENCES,
   [STORAGE_KEYS.appPreferences]: DEFAULT_APP_PREFERENCES,
@@ -913,6 +955,9 @@ function isValidBackupEntry(key: string, value: unknown) {
   if (key === STORAGE_KEYS.generatedQuizzes) {
     return Object.values(value).every((sets) => Array.isArray(sets) && sets.every((set) => isNamedRecord(set, ['id', 'topicId', 'topicName', 'subjectId', 'subjectName', 'generatedAt', 'questions']) && Array.isArray(set.questions) && set.questions.every((item) => isNamedRecord(item, ['id', 'question', 'options', 'correctAnswer']) && Array.isArray(item.options))));
   }
+  if (key === STORAGE_KEYS.topicNotes) {
+    return Object.values(value).every((item) => isNamedRecord(item, ['text', 'updatedAt']) && typeof item.text === 'string');
+  }
 
   return true;
 }
@@ -921,10 +966,10 @@ function parseAndValidateStudyDataBackup(source: unknown) {
   let backup: unknown = source;
   if (typeof source === 'string') {
     try { backup = JSON.parse(source); }
-    catch { throw new Error('The selected file is not valid JSON. Choose a MedExam backup file.'); }
+    catch { throw new Error('The selected file is not valid JSON. Choose a Medora backup file.'); }
   }
   if (!isRecord(backup) || backup.app !== 'MedExam' || backup.version !== 1 || !isRecord(backup.data)) {
-    throw new Error('This is not a supported MedExam backup file.');
+    throw new Error('This is not a supported Medora backup file.');
   }
   const entries = Object.entries(backup.data).filter(([key]) =>
     STORAGE_KEY_LIST.includes(key as (typeof STORAGE_KEY_LIST)[number])
@@ -981,7 +1026,7 @@ export async function restoreStudyDataBackup(
     } catch {
       throw new Error('Restore stopped before it completed. The recovery copy is still saved on this device under Profile → Recovery options.');
     }
-    throw new Error('The restore could not finish, so MedExam automatically put the original data back.');
+    throw new Error('The restore could not finish, so Medora automatically put the original data back.');
   }
   notifyLocalDataChanged();
 }
@@ -1020,6 +1065,7 @@ export async function deleteAllStudyContent(): Promise<void> {
     STORAGE_KEYS.subjects, STORAGE_KEYS.topics, STORAGE_KEYS.exams, STORAGE_KEYS.studyPlans,
     STORAGE_KEYS.studyActivity, STORAGE_KEYS.quizResults, STORAGE_KEYS.flashcards,
     STORAGE_KEYS.flashcardReviews, STORAGE_KEYS.activeRecallQuestions, STORAGE_KEYS.generatedQuizzes,
+    STORAGE_KEYS.topicNotes,
   ];
   const recoveryCopy = await createStudyDataBackup();
   await AsyncStorage.setItem(RECOVERY_BACKUP_KEY, JSON.stringify(recoveryCopy));

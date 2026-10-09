@@ -2,7 +2,7 @@ import { appColor } from '@/constants/adaptive-color';
 import { router } from 'expo-router';
 import { useEffect, useState } from 'react';
 import { ActivityIndicator, Alert } from 'react-native';
-import { SettingsCard, SettingsChoice, SettingsPage, SettingsRow, SettingsNote, SettingsToggle } from './shared';
+import { SettingsCard, SettingsChoice, SettingsPage, SettingsRow, SettingsNote, SettingsToggle } from '@/components/settings-shared';
 import { DEFAULT_STUDY_PREFERENCES, getStudyPreferences, saveStudyPreferences, type StudyMethod, type StudyPeriod, type StudyPreferences } from '../../services/storage';
 
 const DAYS = [{ label: 'Mon', value: 1 }, { label: 'Tue', value: 2 }, { label: 'Wed', value: 3 }, { label: 'Thu', value: 4 }, { label: 'Fri', value: 5 }, { label: 'Sat', value: 6 }, { label: 'Sun', value: 0 }];
@@ -27,13 +27,13 @@ export default function StudySettings() {
   };
   const toggleMethod = (method: StudyMethod) => void update({ preferredMethods: settings.preferredMethods.includes(method) ? settings.preferredMethods.filter((item) => item !== method) : [...settings.preferredMethods, method] });
 
-  return <SettingsPage title="Study preferences" description="Set a routine that MedExam and the study assistant can follow.">
+  return <SettingsPage title="Study preferences" description="Set a routine that Medora and the study assistant can follow.">
     {busy ? <ActivityIndicator color={appColor('#327E9D', 'text')} /> : <>
       <SettingsCard title="Daily study goal" description="The Home assistant uses this target when it suggests what to do next.">
         <SettingsChoice value={String(settings.dailyGoalMinutes)} onChange={(v) => void update({ dailyGoalMinutes: Number(v) })} options={[{ value: '30', label: '30 min' }, { value: '45', label: '45 min' }, { value: '60', label: '1 hour' }, { value: '120', label: '2 hours' }]} />
       </SettingsCard>
       <SettingsCard title="Study days" description="Select at least one day. The planner uses this as the default for new plans.">
-        <SettingsChoice value="" onChange={(v) => toggleDay(Number(v))} options={DAYS.map((day) => ({ value: String(day.value), label: `${settings.studyDays.includes(day.value) ? '✓ ' : ''}${day.label}` }))} />
+        <SettingsChoice multi value={settings.studyDays.map(String)} onChange={(v) => toggleDay(Number(v))} options={DAYS.map((day) => ({ value: String(day.value), label: day.label }))} />
       </SettingsCard>
       <SettingsCard title="Preferred study time">
         <SettingsChoice value={settings.preferredStudyTime} onChange={(v) => void update({ preferredStudyTime: v as StudyPeriod })} options={[{ value: 'morning', label: 'Morning' }, { value: 'afternoon', label: 'Afternoon' }, { value: 'evening', label: 'Evening' }]} />
@@ -47,7 +47,7 @@ export default function StudySettings() {
       </SettingsCard>
       <SettingsRow title="Study plan options" description="Exam priority, weak topics, review and automatic planning" onPress={() => router.push('/settings/planning')} />
       {saving ? <ActivityIndicator color={appColor('#327E9D', 'text')} /> : null}
-      <SettingsNote>At least one study day and one study method must remain selected. Preferences sync with your signed-in account through MedExam cloud backup.</SettingsNote>
+      <SettingsNote>At least one study day and one study method must remain selected. Preferences sync with your signed-in account through Medora cloud backup.</SettingsNote>
     </>}
   </SettingsPage>;
 }

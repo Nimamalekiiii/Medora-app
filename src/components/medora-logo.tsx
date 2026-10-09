@@ -1,11 +1,10 @@
-import { appColor } from '@/constants/adaptive-color';
 import { useEffect } from 'react';
 import { StyleSheet, View } from 'react-native';
 import Animated, { Easing, FadeInDown, useAnimatedStyle, useReducedMotion, useSharedValue, withRepeat, withSequence, withTiming } from 'react-native-reanimated';
 
 type Props = { size?: number; animate?: boolean };
 
-export function MedExamLogoMark({ size = 96, animate = false }: Props) {
+export function MedoraLogoMark({ size = 96, animate = false }: Props) {
   const scale = useSharedValue(1);
   const reduceMotion = useReducedMotion();
 
@@ -28,7 +27,7 @@ export function MedExamLogoMark({ size = 96, animate = false }: Props) {
   return (
     <Animated.View
       accessible
-      accessibilityLabel="MedExam logo"
+      accessibilityLabel="Medora logo"
       entering={animate && !reduceMotion ? FadeInDown.duration(620).springify() : undefined}
       style={[styles.mark, { width: size, height: size, borderRadius: rounded }, pulseStyle]}>
       <View style={[styles.halo, { width: size * 0.76, height: size * 0.76, borderRadius: size * 0.24 }]} />
@@ -43,24 +42,28 @@ export function MedExamLogoMark({ size = 96, animate = false }: Props) {
   );
 }
 
+// The logo is the brand mark, so it keeps the same colours in light and dark mode.
+const LOGO_TEAL = '#1F64BF';
+const LOGO_WHITE = '#F7FFFF';
+
 const styles = StyleSheet.create({
   mark: {
     alignItems: 'center',
     justifyContent: 'center',
-    backgroundColor: appColor('#0F7181', 'background'),
+    backgroundColor: LOGO_TEAL,
     overflow: 'hidden',
-    shadowColor: '#0E5968',
+    shadowColor: '#17498F',
     shadowOpacity: 0.22,
     shadowRadius: 20,
     shadowOffset: { width: 0, height: 10 },
     elevation: 8,
   },
-  halo: { position: 'absolute', borderWidth: 1, borderColor: appColor('#FFFFFF24', 'border') },
-  crossVertical: { position: 'absolute', top: '21%', backgroundColor: appColor('#F7FFFF', 'background') },
-  crossHorizontal: { position: 'absolute', top: '34.5%', backgroundColor: appColor('#F7FFFF', 'background') },
+  halo: { position: 'absolute', borderWidth: 1, borderColor: '#FFFFFF24' },
+  crossVertical: { position: 'absolute', top: '21%', backgroundColor: LOGO_WHITE },
+  crossHorizontal: { position: 'absolute', top: '34.5%', backgroundColor: LOGO_WHITE },
   book: { position: 'absolute', flexDirection: 'row', alignItems: 'flex-end' },
-  page: { flex: 1, height: '82%', borderTopWidth: 2.5, borderColor: appColor('#F7FFFF', 'border') },
+  page: { flex: 1, height: '82%', borderTopWidth: 2.5, borderColor: LOGO_WHITE },
   leftPage: { borderLeftWidth: 2.5, transform: [{ skewY: '-8deg' }], marginRight: 1 },
   rightPage: { borderRightWidth: 2.5, transform: [{ skewY: '8deg' }], marginLeft: 1 },
-  spine: { position: 'absolute', height: '100%', alignSelf: 'center', backgroundColor: appColor('#F7FFFF', 'background') },
+  spine: { position: 'absolute', height: '100%', alignSelf: 'center', backgroundColor: LOGO_WHITE },
 });

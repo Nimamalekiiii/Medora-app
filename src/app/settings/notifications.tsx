@@ -2,7 +2,7 @@ import { LocalizedText as Text } from '@/components/localized-text';
 import { appColor } from '@/constants/adaptive-color';
 import { useEffect, useState } from 'react';
 import { ActivityIndicator, Alert, Linking, Platform, Pressable, View } from 'react-native';
-import { SettingsCard, SettingsChoice, SettingsNote, SettingsPage, SettingsToggle } from './shared';
+import { SettingsCard, SettingsChoice, SettingsNote, SettingsPage, SettingsToggle } from '@/components/settings-shared';
 import { getStudyReminderPreferences, ReminderPermissionError, saveStudyReminderPreferences, sendTestStudyReminder, type StudyReminderPreferences } from '../../services/study-reminder';
 
 const TIMES = ['08:00', '12:00', '17:00', '19:00', '20:00', '21:00'];
@@ -29,15 +29,15 @@ export default function NotificationSettings() {
   }
   async function sendTest() {
     setBusy(true);
-    try { await sendTestStudyReminder(); Alert.alert('Test scheduled', 'Put MedExam in the background. The test notification should arrive in about five seconds.'); }
+    try { await sendTestStudyReminder(); Alert.alert('Test scheduled', 'Put Medora in the background. The test notification should arrive in about five seconds.'); }
     catch (error) { if (error instanceof ReminderPermissionError) Alert.alert('Allow notifications', error.message, [{ text: 'Cancel', style: 'cancel' }, { text: 'Open Settings', onPress: () => { void Linking.openSettings(); } }]); else Alert.alert('Test failed', error instanceof Error ? error.message : 'Try again.'); }
     finally { setBusy(false); }
   }
   if (loading || !prefs) return <SettingsPage title="Notifications" description="Control your study reminders."><ActivityIndicator color={appColor('#327E9D', 'text')} /></SettingsPage>;
 
-  return <SettingsPage title="Notifications" description="Choose which reminders MedExam can schedule on this device.">
+  return <SettingsPage title="Notifications" description="Choose which reminders Medora can schedule on this device.">
     {Platform.OS === 'web' ? <SettingsNote>Local notifications require the iPhone or Android app.</SettingsNote> : <>
-      <SettingsCard title="Daily reminders" description="MedExam combines enabled daily categories into one notification to avoid sending several alerts at once.">
+      <SettingsCard title="Daily reminders" description="Medora combines enabled daily categories into one notification to avoid sending several alerts at once.">
         {CATEGORIES.filter((option) => option.key !== 'exams').map((option) => <SettingsToggle key={option.key} title={option.label} description={option.description} value={prefs[option.key]} onChange={(value) => void save({ ...prefs, [option.key]: value })} disabled={busy} />)}
         <Text style={{ color: appColor('#315267', 'text'), fontSize: 12, fontWeight: '700', marginTop: 10 }}>Daily reminder times (choose up to 3)</Text>
         <SettingsChoice multi value={prefs.times} onChange={(time) => {
@@ -55,7 +55,7 @@ export default function NotificationSettings() {
         }} disabled={busy} />)}
       </SettingsCard>
       <View style={{ paddingHorizontal: 2, marginBottom: 12 }}><Pressable accessibilityRole="button" disabled={busy} onPress={() => { void sendTest(); }} style={{ alignSelf: 'flex-start', paddingVertical: 10 }}><Text style={{ color: appColor('#327E9D', 'text'), fontWeight: '800' }}>{busy ? 'Working…' : 'Send a test notification'}</Text></Pressable></View>
-      <SettingsNote>All reminders are stored and scheduled on this device. Your phone may still silence them if MedExam notifications are disabled in system settings.</SettingsNote>
+      <SettingsNote>All reminders are stored and scheduled on this device. Your phone may still silence them if Medora notifications are disabled in system settings.</SettingsNote>
     </>}
   </SettingsPage>;
 }

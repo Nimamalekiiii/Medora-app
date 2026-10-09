@@ -1,88 +1,129 @@
-import { LocalizedText as Text } from '@/components/localized-text';
+import { cardShadow } from '@/components/gloss';
+import { IconChip } from '@/components/study/icon-chip';
+import { ProgressBar } from '@/components/charts';
+import { ink, p, useProgressPalette } from '@/components/progress/theme';
 import PullToRefreshScrollView from '@/components/pull-to-refresh-scroll-view';
+import { Chips, PillButton, ScreenBar, SectionHeader, studyStyles } from '@/components/study/study-ui';
+import { TopicNotesField, useTopicNotes } from '@/components/study/topic-notes';
 import { StudyIcon } from '@/components/study-icon';
 import { appColor } from '@/constants/adaptive-color';
+import { ui } from '@/constants/ui';
+import { useStudyData } from '@/hooks/use-study-data';
 import { generateAIActiveRecall } from '@/services/ai-api';
-import { getActiveRecallQuestionsForTopic, getAIPreferences, getSubjects, saveActiveRecallProgress, saveActiveRecallQuestionsForTopic } from '@/services/storage';
-import { calculateNextReviewDate } from '@/services/study-engine';
+import { useAppSettings } from '@/services/app-settings-context';
+import { formatReviewInterval } from '@/services/localization';
+import { buildRecallQueue, isRecallDifficult, isRecallDue, recallRememberedRate, type RecallMode } from '@/services/recall-session';
+import { previewReviewIntervals, scheduleReview, type ReviewRating } from '@/services/spaced-repetition';
+import { getActiveRecallQuestionsForTopic, getAIPreferences, saveActiveRecallProgress, saveActiveRecallQuestionsForTopic } from '@/services/storage';
+import { calculateTopicMastery } from '@/services/topic-mastery';
 import type { ActiveRecallQuestion, StudyActivity } from '@/types/study';
-import { Stack, router, useLocalSearchParams } from 'expo-router';
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { Stack, useLocalSearchParams } from 'expo-router';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import {
-  ActivityIndicator, Alert, KeyboardAvoidingView, Modal, Platform, Pressable, ScrollView,
-  StyleSheet, TextInput, View,
+  ActivityIndicator, Alert, KeyboardAvoidingView, Modal, Platform, Pressable, ScrollView, StyleSheet, Switch, Text, TextInput, View,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
-type RecallRating = 'again' | 'hard' | 'good' | 'easy';
-type DraftQuestion = { question: string; answer: string };
+const param = (value: string | string[] | undefined) => (Array.isArray(value) ? value[0] ?? '' : value ?? '');
+const RATINGS: ReviewRating[] = ['again', 'hard', 'good', 'easy'];
+const RATING_COLOR: Record<ReviewRating, string> = { again: '#D03B3B', hard: '#C98500', good: '#2A78D6', easy: '#0CA30C' };
+const AI_COUNT_CHOICES = [5, 10, 20, 30, 50];
+const SESSION_COUNT_CHOICES = ['10', '20', '30', '0'] as const;
+const PREVIEW_QUESTIONS = 3;
 
-const RATING_DAYS: Record<RecallRating, number> = { again: 1, hard: 2, good: 4, easy: 7 };
+type Counts = Record<ReviewRating, number>;
+type Draft = { key: string; question: string; answer: string };
+type Difficulty = 'easy' | 'medium' | 'hard';
+const noCounts = (): Counts => ({ again: 0, hard: 0, good: 0, easy: 0 });
 
-function isDue(question: ActiveRecallQuestion, now = Date.now()) {
-  if (!question.nextReviewAt) return true;
-  const date = new Date(question.nextReviewAt).getTime();
-  return !Number.isFinite(date) || date <= now;
-}
-
-function getNextReviewAt(rating: RecallRating, now = new Date()) {
-  return calculateNextReviewDate(rating, now);
-}
-
-function createBlankDraft(): DraftQuestion { return { question: '', answer: '' }; }
-
+/**
+ * Active Recall for one topic: open questions the student answers from
+ * memory, then rates. The rating decides when each question comes back.
+ */
 export default function ActiveRecallScreen() {
-  const params = useLocalSearchParams();
-  const topicId = Array.isArray(params.id) ? params.id[0] : String(params.id ?? '');
-  const topicName = Array.isArray(params.name) ? params.name[0] : String(params.name ?? 'Topic');
-  const subjectId = Array.isArray(params.subjectId) ? params.subjectId[0] : String(params.subjectId ?? '');
+  const params = useLocalSearchParams<{ id?: string | string[]; name?: string | string[]; subjectId?: string | string[] }>();
+  const topicId = param(params.id);
+  const { preferences } = useAppSettings();
+  const language = preferences.language;
+  const L = (en: string, no: string) => (language === 'no' ? no : en);
+  const palette = useProgressPalette();
+  const { metrics, reload } = useStudyData();
+
+  const topic = metrics?.topics.find((item) => String(item.id) === topicId);
+  const topicName = topic?.name ?? (param(params.name) || L('Topic', 'Tema'));
+  const subjectName = topic?.subjectName ?? '';
+  const recallProgress = topic ? calculateTopicMastery({ ...topic, daysSinceLastStudy: topic.daysSinceStudy }).parts.recall : 0;
+
   const [questions, setQuestions] = useState<ActiveRecallQuestion[]>([]);
   const [loading, setLoading] = useState(true);
+  const [loadFailed, setLoadFailed] = useState(false);
   const [saving, setSaving] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [sessionQuestions, setSessionQuestions] = useState<ActiveRecallQuestion[]>([]);
-  const [sessionIndex, setSessionIndex] = useState(0);
-  const [showAnswer, setShowAnswer] = useState(false);
-  const [sessionFinished, setSessionFinished] = useState(false);
-  const [ratings, setRatings] = useState<RecallRating[]>([]);
-  const [sessionStartedAt, setSessionStartedAt] = useState(0);
-  const [sessionActivityId, setSessionActivityId] = useState<number | null>(null);
-  const [questionModalVisible, setQuestionModalVisible] = useState(false);
-  const [editingQuestionId, setEditingQuestionId] = useState<number | null>(null);
-  const [questionDraft, setQuestionDraft] = useState<DraftQuestion>(createBlankDraft());
-  const [aiModalVisible, setAIModalVisible] = useState(false);
-  const [sourceMaterial, setSourceMaterial] = useState('');
-  const [questionCount, setQuestionCount] = useState(10);
-  const [difficulty, setDifficulty] = useState<'easy' | 'medium' | 'hard'>('medium');
-  const [generating, setGenerating] = useState(false);
-  const [generationProgress, setGenerationProgress] = useState(0);
-  const [generatedDrafts, setGeneratedDrafts] = useState<DraftQuestion[] | null>(null);
+  const [showAll, setShowAll] = useState(false);
 
-  const loadQuestions = useCallback(async (showSpinner = false) => {
-    if (showSpinner) setLoading(true);
-    setError(null);
+  // Session settings.
+  const [mode, setMode] = useState<RecallMode | null>(null);
+  const [sessionCount, setSessionCount] = useState<(typeof SESSION_COUNT_CHOICES)[number]>('10');
+  const [writeFirst, setWriteFirst] = useState(false);
+
+  // The session.
+  const [queue, setQueue] = useState<ActiveRecallQuestion[]>([]);
+  const [index, setIndex] = useState(0);
+  const [revealed, setRevealed] = useState(false);
+  const [finished, setFinished] = useState(false);
+  const [ownAnswer, setOwnAnswer] = useState('');
+  const [totals, setTotals] = useState<Counts>(noCounts);
+  const [struggledIds, setStruggledIds] = useState<number[]>([]);
+  const [rateFailed, setRateFailed] = useState(false);
+  const [sessionMinutes, setSessionMinutes] = useState(1);
+  const startedAt = useRef(0);
+  const activityId = useRef(0);
+
+  // Add or edit one question.
+  const [editorVisible, setEditorVisible] = useState(false);
+  const [editingId, setEditingId] = useState<number | null>(null);
+  const [draftQuestion, setDraftQuestion] = useState('');
+  const [draftAnswer, setDraftAnswer] = useState('');
+  const [editorError, setEditorError] = useState('');
+
+  // Create with AI.
+  const [aiVisible, setAIVisible] = useState(false);
+  const [aiCount, setAICount] = useState(10);
+  const [difficulty, setDifficulty] = useState<Difficulty>('medium');
+  const [generating, setGenerating] = useState(false);
+  const [generated, setGenerated] = useState(0);
+  const [drafts, setDrafts] = useState<Draft[] | null>(null);
+  const [aiError, setAIError] = useState('');
+  const topicNotes = useTopicNotes(topicId);
+
+  const loadQuestions = useCallback(async () => {
     try {
-      const nextQuestions = await getActiveRecallQuestionsForTopic(topicId);
-      setQuestions(nextQuestions);
-    } catch (loadError) {
-      setError(loadError instanceof Error ? loadError.message : 'Could not load your questions.');
+      setQuestions(await getActiveRecallQuestionsForTopic(topicId));
+      setLoadFailed(false);
+    } catch (error) {
+      console.warn('Could not load the Active Recall questions:', error);
+      setLoadFailed(true);
     } finally {
       setLoading(false);
     }
   }, [topicId]);
 
   useEffect(() => {
-    void loadQuestions(true);
-    void getAIPreferences().then((preferences) => {
-      setQuestionCount(preferences.questionCount);
-      setDifficulty(preferences.difficulty);
+    let active = true;
+    void loadQuestions();
+    void getAIPreferences().then((prefs) => {
+      if (!active) return;
+      setAICount(prefs.questionCount);
+      setDifficulty(prefs.difficulty);
     });
+    return () => { active = false; };
   }, [loadQuestions]);
 
-  const dueQuestions = useMemo(() => questions.filter((question) => isDue(question)), [questions]);
-  const currentQuestion = sessionQuestions[sessionIndex];
-  const counts = useMemo(() => ratings.reduce((result, rating) => ({ ...result, [rating]: result[rating] + 1 }),
-    { again: 0, hard: 0, good: 0, easy: 0 }), [ratings]);
+  const dueCount = questions.filter((question) => isRecallDue(question)).length;
+  const difficultCount = questions.filter(isRecallDifficult).length;
+  const remembered = recallRememberedRate(questions);
+  // Until she chooses, practise what is due, or everything when nothing is due.
+  const activeMode: RecallMode = mode ?? (dueCount > 0 ? 'due' : 'all');
+  const available = buildRecallQueue(questions, { mode: activeMode, count: Number(sessionCount) }).length;
 
   async function persist(next: ActiveRecallQuestion[]) {
     setSaving(true);
@@ -90,176 +131,332 @@ export default function ActiveRecallScreen() {
       await saveActiveRecallQuestionsForTopic(topicId, next);
       setQuestions(next);
       return true;
-    } catch (saveError) {
-      Alert.alert('Could not save', saveError instanceof Error ? saveError.message : 'Your changes were not saved. Please try again.');
+    } catch (error) {
+      console.warn('Could not save the Active Recall questions:', error);
       return false;
     } finally {
       setSaving(false);
     }
   }
 
-  function openCreateQuestion() {
-    setEditingQuestionId(null);
-    setQuestionDraft(createBlankDraft());
-    setQuestionModalVisible(true);
+  // ----- Session -----
+  function beginSession(selected: ActiveRecallQuestion[]) {
+    if (!selected.length) return;
+    setQueue(selected);
+    setIndex(0);
+    setRevealed(false);
+    setFinished(false);
+    setOwnAnswer('');
+    setTotals(noCounts());
+    setStruggledIds([]);
+    setRateFailed(false);
+    startedAt.current = Date.now();
+    activityId.current = Date.now();
   }
 
-  function openEditQuestion(question: ActiveRecallQuestion) {
-    setEditingQuestionId(question.id);
-    setQuestionDraft({ question: question.question, answer: question.answer });
-    setQuestionModalVisible(true);
+  function startSession() {
+    beginSession(buildRecallQueue(questions, { mode: activeMode, count: Number(sessionCount) }));
   }
 
-  async function saveManualQuestion() {
-    const question = questionDraft.question.trim();
-    const answer = questionDraft.answer.trim();
-    if (!question || !answer) {
-      Alert.alert('Add both sides', 'Enter a question and its answer before saving.');
+  function endSession() {
+    setQueue([]);
+    setFinished(false);
+    setRevealed(false);
+    setOwnAnswer('');
+    void loadQuestions();
+    void reload();
+  }
+
+  const current = queue[index];
+
+  async function rate(rating: ReviewRating) {
+    if (!current || saving) return;
+    const ratedAt = new Date();
+    const updated: ActiveRecallQuestion = {
+      ...current,
+      ...scheduleReview({ ...current, lastReviewedAt: current.lastRatedAt }, rating, ratedAt),
+      lastRatedAt: ratedAt.toISOString(),
+      againCount: (current.againCount ?? 0) + (rating === 'again' ? 1 : 0),
+      hardCount: (current.hardCount ?? 0) + (rating === 'hard' ? 1 : 0),
+      goodCount: (current.goodCount ?? 0) + (rating === 'good' ? 1 : 0),
+      easyCount: (current.easyCount ?? 0) + (rating === 'easy' ? 1 : 0),
+    };
+    const nextQuestions = questions.map((question) => (question.id === updated.id ? updated : question));
+    const nextTotals = { ...totals, [rating]: totals[rating] + 1 };
+    const answered = nextTotals.again + nextTotals.hard + nextTotals.good + nextTotals.easy;
+    const durationSeconds = Math.max(1, Math.round((Date.now() - startedAt.current) / 1000));
+    // One activity per session, updated after every rating so nothing is lost if she stops early.
+    const activity: StudyActivity = {
+      id: activityId.current, topicId, topicName, activity: 'active_recall', completedAt: ratedAt.toISOString(), durationSeconds,
+      questionCount: answered, correctCount: nextTotals.good + nextTotals.easy, wrongCount: nextTotals.again + nextTotals.hard,
+      score: Math.round(((nextTotals.good + nextTotals.easy) / answered) * 100),
+      againCount: nextTotals.again, hardCount: nextTotals.hard, goodCount: nextTotals.good, easyCount: nextTotals.easy,
+    };
+    setSaving(true);
+    try {
+      await saveActiveRecallProgress(topicId, nextQuestions, activity);
+    } catch (error) {
+      console.warn('Could not save the Active Recall rating:', error);
+      setRateFailed(true);
+      return;
+    } finally {
+      setSaving(false);
+    }
+    setRateFailed(false);
+    setQuestions(nextQuestions);
+    setTotals(nextTotals);
+    if (rating === 'again' || rating === 'hard') setStruggledIds((ids) => [...ids, updated.id]);
+    if (index < queue.length - 1) {
+      setIndex((value) => value + 1);
+      setRevealed(false);
+      setOwnAnswer('');
       return;
     }
-    const next = editingQuestionId === null
-      ? [...questions, { id: Date.now(), question, answer, createdBy: 'manual' as const }]
-      : questions.map((item) => item.id === editingQuestionId ? { ...item, question, answer } : item);
-    if (await persist(next)) {
-      setQuestionModalVisible(false);
-      setEditingQuestionId(null);
-      setQuestionDraft(createBlankDraft());
+    setSessionMinutes(Math.max(1, Math.round(durationSeconds / 60)));
+    setFinished(true);
+  }
+
+  // ----- Add / edit -----
+  function openEditor(question: ActiveRecallQuestion | null) {
+    setEditingId(question?.id ?? null);
+    setDraftQuestion(question?.question ?? '');
+    setDraftAnswer(question?.answer ?? '');
+    setEditorError('');
+    setEditorVisible(true);
+  }
+
+  async function saveQuestion() {
+    const question = draftQuestion.trim();
+    const answer = draftAnswer.trim();
+    if (!question || !answer) {
+      setEditorError(L('Enter both a question and an answer.', 'Skriv inn både spørsmål og svar.'));
+      return;
     }
+    const next = editingId === null
+      ? [...questions, { id: Date.now(), question, answer, createdBy: 'manual' as const }]
+      : questions.map((item) => (item.id === editingId ? { ...item, question, answer } : item));
+    if (await persist(next)) setEditorVisible(false);
+    else setEditorError(L('The question could not be saved. Try again.', 'Spørsmålet kunne ikke lagres. Prøv igjen.'));
   }
 
   function deleteQuestion(question: ActiveRecallQuestion) {
-    Alert.alert('Delete question?', 'This permanently removes the question from this topic.', [
-      { text: 'Cancel', style: 'cancel' },
-      { text: 'Delete', style: 'destructive', onPress: () => { void persist(questions.filter((item) => item.id !== question.id)); } },
+    Alert.alert(L('Delete this question?', 'Slette dette spørsmålet?'), L('It is removed from this topic for good.', 'Det fjernes fra temaet for godt.'), [
+      { text: L('Cancel', 'Avbryt'), style: 'cancel' },
+      {
+        text: L('Delete', 'Slett'), style: 'destructive',
+        onPress: () => {
+          void persist(questions.filter((item) => item.id !== question.id)).then((saved) => {
+            if (!saved) Alert.alert(L('Could not delete', 'Kunne ikke slette'), L('Try again.', 'Prøv igjen.'));
+          });
+        },
+      },
     ]);
   }
 
-  async function generateQuestions() {
+  // ----- AI -----
+  function openAI() {
+    setDrafts(null);
+    setAIError('');
+    void topicNotes.load();
+    setAIVisible(true);
+  }
+
+  function closeAI() {
+    if (generating || saving) return;
+    setAIVisible(false);
+    setDrafts(null);
+    void topicNotes.load();
+  }
+
+  async function generate() {
+    if (generating) return;
     setGenerating(true);
-    setGenerationProgress(0);
+    setGenerated(0);
+    setAIError('');
     try {
-      const subjects = await getSubjects();
-      const subject = subjects.find((item) => String(item.id) === subjectId);
-      const hardOrAgain = questions.filter((item) => (item.againCount ?? 0) + (item.hardCount ?? 0) > 0);
-      const struggleSummary = hardOrAgain.length
-        ? `${hardOrAgain.length} saved question${hardOrAgain.length === 1 ? '' : 's'} have been marked Again or Hard; prioritize related foundational concepts.`
-        : undefined;
-      const generated = await generateAIActiveRecall({
-        subjectName: subject?.name ?? 'Medical studies',
+      const material = await topicNotes.save();
+      const struggled = questions.filter((item) => (item.againCount ?? 0) + (item.hardCount ?? 0) > 0).length;
+      const created = await generateAIActiveRecall({
+        subjectName: subjectName || 'Medical studies',
         topicName,
-        questionCount,
-        sourceMaterial: sourceMaterial.trim() || undefined,
+        questionCount: aiCount,
+        sourceMaterial: material || undefined,
         previousQuestions: questions.map((item) => item.question),
-        struggleSummary,
+        struggleSummary: struggled ? `${struggled} saved question${struggled === 1 ? '' : 's'} have been marked Again or Hard; prioritize related foundational concepts.` : undefined,
         difficulty,
-        onProgress: (completed) => setGenerationProgress(completed),
+        onProgress: setGenerated,
       });
-      setGeneratedDrafts(generated);
-    } catch (generationError) {
-      Alert.alert('Could not generate questions', generationError instanceof Error ? generationError.message : 'Please check your connection and try again.');
+      const stamp = Date.now();
+      setDrafts(created.map((item, draftIndex) => ({ key: `${stamp}-${draftIndex}`, question: item.question, answer: item.answer })));
+    } catch (error) {
+      setAIError(error instanceof Error ? error.message : L('The questions could not be created. Try again.', 'Spørsmålene kunne ikke lages. Prøv igjen.'));
     } finally {
       setGenerating(false);
     }
   }
 
-  async function saveGeneratedQuestions() {
-    const drafts = (generatedDrafts ?? []).map((item) => ({ question: item.question.trim(), answer: item.answer.trim() })).filter((item) => item.question && item.answer);
-    if (!drafts.length) return;
-    const createdAt = Date.now();
-    const additions: ActiveRecallQuestion[] = drafts.map((item, index) => ({
-      id: createdAt + index, ...item, createdBy: 'ai',
-    }));
+  async function saveDrafts() {
+    const ready = (drafts ?? []).map((item) => ({ question: item.question.trim(), answer: item.answer.trim() })).filter((item) => item.question && item.answer);
+    if (!ready.length) return;
+    const stamp = Date.now();
+    const additions: ActiveRecallQuestion[] = ready.map((item, draftIndex) => ({ id: stamp + draftIndex, ...item, createdBy: 'ai' }));
     if (await persist([...questions, ...additions])) {
-      setGeneratedDrafts(null);
-      setAIModalVisible(false);
-      setSourceMaterial('');
-      Alert.alert('Questions saved', `${additions.length} Active Recall questions were added to ${topicName}.`);
+      setDrafts(null);
+      setAIVisible(false);
+    } else {
+      setAIError(L('The questions could not be saved. Try again.', 'Spørsmålene kunne ikke lagres. Prøv igjen.'));
     }
   }
 
-  function startSession(includeAll = false) {
-    const selected = includeAll ? questions : dueQuestions;
-    if (!selected.length) return;
-    setSessionQuestions([...selected].sort((a, b) => {
-      const aNext = a.nextReviewAt ? new Date(a.nextReviewAt).getTime() : 0;
-      const bNext = b.nextReviewAt ? new Date(b.nextReviewAt).getTime() : 0;
-      return aNext - bNext;
-    }));
-    setSessionIndex(0);
-    setShowAnswer(false);
-    setRatings([]);
-    setSessionFinished(false);
-    setSessionStartedAt(Date.now());
-    setSessionActivityId(Date.now());
+  const ratingLabel: Record<ReviewRating, string> = { again: L('Again', 'Igjen'), hard: L('Hard', 'Vanskelig'), good: L('Good', 'Bra'), easy: L('Easy', 'Lett') };
+  const difficultyLabel: Record<Difficulty, string> = { easy: L('Easy', 'Lett'), medium: L('Medium', 'Middels'), hard: L('Hard', 'Vanskelig') };
+  const locale = language === 'no' ? 'nb-NO' : 'en-GB';
+
+  // ----- Session screens -----
+  if (queue.length > 0) {
+    const answered = totals.again + totals.hard + totals.good + totals.easy;
+    const bar = (
+      <View style={styles.bar}>
+        <Pressable accessibilityRole="button" accessibilityLabel={L('End session', 'Avslutt økten')} onPress={endSession} style={({ pressed }) => [styles.barButton, pressed && p.pressed]} hitSlop={8}>
+          <StudyIcon name="x" size={18} color={ink.secondary} />
+        </Pressable>
+        <Text style={styles.barTitle} numberOfLines={1}>{topicName}</Text>
+        <View style={styles.barButton} />
+      </View>
+    );
+
+    if (finished || !current) {
+      const again = questions.filter((question) => struggledIds.includes(question.id));
+      return (
+        <SafeAreaView style={ui.container} edges={['top', 'bottom']}>
+          <Stack.Screen options={{ headerShown: false }} />
+          <View style={styles.page}>
+            {bar}
+            <ScrollView contentContainerStyle={styles.scroll} showsVerticalScrollIndicator={false}>
+              <View style={[p.card, styles.doneCard]}>
+                <View style={[styles.doneIcon, { backgroundColor: palette.accent }]}><StudyIcon name="check" size={26} color="#FFFFFF" /></View>
+                <Text style={styles.doneTitle}>{L('Session complete', 'Økten er fullført')}</Text>
+                <Text style={[p.body, styles.centered]}>{answered} {L('questions', 'spørsmål')} · {sessionMinutes} min</Text>
+                <View style={styles.summary}>
+                  {RATINGS.map((rating) => (
+                    <View key={rating} style={styles.summaryItem}>
+                      <View style={styles.inline}><View style={[p.legendDot, { backgroundColor: RATING_COLOR[rating] }]} /><Text style={styles.summaryValue}>{totals[rating]}</Text></View>
+                      <Text style={p.small}>{ratingLabel[rating]}</Text>
+                    </View>
+                  ))}
+                </View>
+                <Text style={[p.small, styles.centered]}>{L('Each question comes back when it is due, based on how you rated it.', 'Hvert spørsmål kommer tilbake når det forfaller, ut fra hvordan du vurderte det.')}</Text>
+              </View>
+              {again.length ? (
+                <Pressable accessibilityRole="button" onPress={() => beginSession(again)} style={({ pressed }) => [p.button, styles.wide, styles.buttonRow, { backgroundColor: palette.accent }, pressed && p.pressed]}>
+                  <StudyIcon name="undo" size={15} color="#FFFFFF" /><Text style={p.buttonText}>{L(`Go through the ${again.length} hard ones again`, `Ta de ${again.length} vanskelige en gang til`)}</Text>
+                </Pressable>
+              ) : null}
+              <Pressable accessibilityRole="button" onPress={endSession} style={({ pressed }) => [again.length ? p.outlineButton : p.button, styles.wide, !again.length && { backgroundColor: palette.accent }, pressed && p.pressed]}>
+                <Text style={again.length ? p.outlineButtonText : p.buttonText}>{L('Done', 'Ferdig')}</Text>
+              </Pressable>
+            </ScrollView>
+          </View>
+        </SafeAreaView>
+      );
+    }
+
+    const intervals = previewReviewIntervals({ ...current, lastReviewedAt: current.lastRatedAt });
+    return (
+      <SafeAreaView style={ui.container} edges={['top', 'bottom']}>
+        <Stack.Screen options={{ headerShown: false }} />
+        <KeyboardAvoidingView style={styles.page} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
+          {bar}
+          <View style={styles.progress}>
+            <Text style={p.small}>{L('Question', 'Spørsmål')} {index + 1} {L('of', 'av')} {queue.length}</Text>
+            <ProgressBar value={(index / queue.length) * 100} color={palette.accent} trackColor={palette.track} height={6} />
+          </View>
+
+          <ScrollView contentContainerStyle={styles.scroll} showsVerticalScrollIndicator={false} keyboardShouldPersistTaps="handled">
+            <View style={[p.card, styles.card]}>
+              <Text style={styles.side}>{L('Question', 'Spørsmål')}</Text>
+              <Text style={styles.question}>{current.question}</Text>
+              {writeFirst && !revealed ? (
+                <TextInput
+                  value={ownAnswer}
+                  onChangeText={setOwnAnswer}
+                  style={[ui.textInput, styles.ownAnswer]}
+                  placeholder={L('Write what you remember', 'Skriv det du husker')}
+                  placeholderTextColor={appColor('#91A2AE', 'text')}
+                  multiline
+                  textAlignVertical="top"
+                  accessibilityLabel={L('Your answer', 'Ditt svar')}
+                />
+              ) : null}
+              {revealed ? (
+                <>
+                  {ownAnswer.trim() ? (
+                    <View style={p.inset}>
+                      <Text style={styles.side}>{L('Your answer', 'Ditt svar')}</Text>
+                      <Text style={[p.body, styles.ownShown]}>{ownAnswer.trim()}</Text>
+                    </View>
+                  ) : null}
+                  <View style={styles.divider} />
+                  <Text style={styles.side}>{L('Answer', 'Svar')}</Text>
+                  <Text style={styles.answer}>{current.answer}</Text>
+                </>
+              ) : !writeFirst ? (
+                <Text style={[p.small, styles.hint]}>{L('Say the answer out loud or in your head before you check.', 'Si svaret høyt eller inni deg før du sjekker.')}</Text>
+              ) : null}
+            </View>
+          </ScrollView>
+
+          <View style={styles.footer}>
+            {rateFailed ? <Text style={styles.error}>{L('The rating could not be saved. Try again.', 'Vurderingen kunne ikke lagres. Prøv igjen.')}</Text> : null}
+            {revealed ? (
+              <>
+                <Text style={[p.small, styles.centered]}>{L('How well did you remember it?', 'Hvor godt husket du det?')}</Text>
+                <View style={styles.ratings}>
+                  {RATINGS.map((rating) => (
+                    <Pressable
+                      key={rating}
+                      accessibilityRole="button"
+                      accessibilityLabel={`${ratingLabel[rating]}, ${formatReviewInterval(intervals[rating], language)}`}
+                      disabled={saving}
+                      onPress={() => { void rate(rating); }}
+                      style={({ pressed }) => [styles.rating, (pressed || saving) && p.pressed]}
+                    >
+                      <View style={[styles.ratingMark, { backgroundColor: RATING_COLOR[rating] }]} />
+                      <Text style={styles.ratingLabel}>{ratingLabel[rating]}</Text>
+                      <Text style={styles.ratingWhen} numberOfLines={1}>{formatReviewInterval(intervals[rating], language)}</Text>
+                    </Pressable>
+                  ))}
+                </View>
+              </>
+            ) : (
+              <Pressable accessibilityRole="button" onPress={() => setRevealed(true)} style={({ pressed }) => [p.button, styles.big, { backgroundColor: palette.accent }, pressed && p.pressed]}>
+                <Text style={styles.bigText}>{L('Show answer', 'Vis svar')}</Text>
+              </Pressable>
+            )}
+          </View>
+        </KeyboardAvoidingView>
+      </SafeAreaView>
+    );
   }
 
-  async function rateQuestion(rating: RecallRating) {
-    if (!currentQuestion || saving) return;
-    const ratedAt = new Date();
-    const updated = {
-      ...currentQuestion,
-      nextReviewAt: getNextReviewAt(rating, ratedAt),
-      lastRatedAt: ratedAt.toISOString(),
-      againCount: (currentQuestion.againCount ?? 0) + (rating === 'again' ? 1 : 0),
-      hardCount: (currentQuestion.hardCount ?? 0) + (rating === 'hard' ? 1 : 0),
-      goodCount: (currentQuestion.goodCount ?? 0) + (rating === 'good' ? 1 : 0),
-      easyCount: (currentQuestion.easyCount ?? 0) + (rating === 'easy' ? 1 : 0),
-    };
-    const updatedQuestions = questions.map((question) => question.id === updated.id ? updated : question);
-    const nextRatings = [...ratings, rating];
-    const finalCounts = nextRatings.reduce((result, value) => ({ ...result, [value]: result[value] + 1 }), { again: 0, hard: 0, good: 0, easy: 0 });
-    const activity: StudyActivity = {
-      id: sessionActivityId ?? Date.now(), topicId, topicName, activity: 'active_recall', completedAt: ratedAt.toISOString(),
-      durationSeconds: Math.max(1, Math.round((Date.now() - sessionStartedAt) / 1000)),
-      questionCount: nextRatings.length, correctCount: finalCounts.good + finalCounts.easy,
-      wrongCount: finalCounts.again + finalCounts.hard,
-      score: Math.round(((finalCounts.good + finalCounts.easy) / nextRatings.length) * 100),
-      againCount: finalCounts.again, hardCount: finalCounts.hard, goodCount: finalCounts.good, easyCount: finalCounts.easy,
-    };
-    setSaving(true);
-    try {
-      await saveActiveRecallProgress(topicId, updatedQuestions, activity);
-    } catch (saveError) {
-      Alert.alert('Could not save this rating', saveError instanceof Error ? saveError.message : 'Your answer was not recorded. Please try again.');
-      return;
-    } finally {
-      setSaving(false);
-    }
-    setSessionActivityId(activity.id);
-    setQuestions(updatedQuestions);
-    setSessionQuestions((items) => items.map((question) => question.id === updated.id ? updated : question));
-    setRatings(nextRatings);
-    if (sessionIndex < sessionQuestions.length - 1) {
-      setSessionIndex((index) => index + 1);
-      setShowAnswer(false);
-      return;
-    }
-    setSessionFinished(true);
-  }
-
-  function ratingLabel(rating: RecallRating) {
-    switch (rating) {
-      case 'again': return 'Again';
-      case 'hard': return 'Hard';
-      case 'good': return 'Good';
-      case 'easy': return 'Easy';
-    }
-  }
-
-  const manualModal = (
-    <Modal visible={questionModalVisible} transparent animationType="slide" onRequestClose={() => setQuestionModalVisible(false)}>
+  // ----- Sheets -----
+  const editor = (
+    <Modal visible={editorVisible} transparent animationType="slide" onRequestClose={() => { if (!saving) setEditorVisible(false); }}>
       <KeyboardAvoidingView style={styles.modalKeyboard} behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
-        <View style={styles.modalBackdrop}>
-          <ScrollView style={styles.modalScroll} contentContainerStyle={styles.modalScrollContent} keyboardShouldPersistTaps="handled">
-            <View style={styles.modalCard}>
-              <Text style={styles.modalTitle}>{editingQuestionId === null ? 'Add a question' : 'Edit question'}</Text>
-              <Text style={styles.fieldLabel}>QUESTION</Text>
-              <TextInput value={questionDraft.question} onChangeText={(question) => setQuestionDraft((draft) => ({ ...draft, question }))} style={styles.textInput} placeholder="Write a question" placeholderTextColor={appColor('#91A2AE', 'text')} multiline />
-              <Text style={styles.fieldLabel}>ANSWER</Text>
-              <TextInput value={questionDraft.answer} onChangeText={(answer) => setQuestionDraft((draft) => ({ ...draft, answer }))} style={[styles.textInput, styles.multiline]} placeholder="Write the answer" placeholderTextColor={appColor('#91A2AE', 'text')} multiline />
-              <View style={styles.modalActions}>
-                <Pressable onPress={() => setQuestionModalVisible(false)} style={styles.secondaryButton}><Text style={styles.secondaryButtonText}>Cancel</Text></Pressable>
-                <Pressable disabled={saving} onPress={() => { void saveManualQuestion(); }} style={styles.primaryButton}><Text style={styles.primaryButtonText}>{saving ? 'Saving…' : 'Save question'}</Text></Pressable>
+        <View style={ui.modalBackdrop}>
+          <ScrollView contentContainerStyle={styles.modalScroll} keyboardShouldPersistTaps="handled">
+            <View style={ui.modalCard}>
+              <Text style={ui.modalTitle}>{editingId === null ? L('New question', 'Nytt spørsmål') : L('Edit question', 'Rediger spørsmål')}</Text>
+              <Text style={ui.fieldLabel}>{L('QUESTION', 'SPØRSMÅL')}</Text>
+              <TextInput value={draftQuestion} onChangeText={(value) => { setDraftQuestion(value); setEditorError(''); }} style={[ui.textInput, styles.multiline]} placeholder={L('What should you be able to explain?', 'Hva skal du kunne forklare?')} placeholderTextColor={appColor('#91A2AE', 'text')} multiline maxLength={600} autoFocus accessibilityLabel={L('Question', 'Spørsmål')} />
+              <Text style={ui.fieldLabel}>{L('ANSWER', 'SVAR')}</Text>
+              <TextInput value={draftAnswer} onChangeText={(value) => { setDraftAnswer(value); setEditorError(''); }} style={[ui.textInput, styles.multiline]} placeholder={L('The answer', 'Svaret')} placeholderTextColor={appColor('#91A2AE', 'text')} multiline maxLength={3000} accessibilityLabel={L('Answer', 'Svar')} />
+              {editorError ? <Text style={ui.formError}>{editorError}</Text> : null}
+              <View style={ui.modalActions}>
+                <Pressable accessibilityRole="button" style={ui.secondaryButton} onPress={() => setEditorVisible(false)} disabled={saving}><Text style={ui.secondaryButtonText}>{L('Cancel', 'Avbryt')}</Text></Pressable>
+                <Pressable accessibilityRole="button" style={[ui.primaryButton, saving && ui.disabled]} onPress={() => { void saveQuestion(); }} disabled={saving}>
+                  {saving ? <ActivityIndicator color="#FFFFFF" /> : <Text style={ui.primaryButtonText}>{L('Save question', 'Lagre spørsmål')}</Text>}
+                </Pressable>
               </View>
             </View>
           </ScrollView>
@@ -269,38 +466,55 @@ export default function ActiveRecallScreen() {
   );
 
   const aiModal = (
-    <Modal visible={aiModalVisible} transparent animationType="slide" onRequestClose={() => { if (!generating) { setAIModalVisible(false); setGeneratedDrafts(null); } }}>
+    <Modal visible={aiVisible} transparent animationType="slide" onRequestClose={closeAI}>
       <KeyboardAvoidingView style={styles.modalKeyboard} behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
-        <View style={styles.modalBackdrop}>
-          <ScrollView style={styles.modalScroll} contentContainerStyle={styles.modalScrollContent} keyboardShouldPersistTaps="handled" keyboardDismissMode={Platform.OS === 'ios' ? 'interactive' : 'on-drag'} automaticallyAdjustKeyboardInsets={Platform.OS === 'ios'}>
-            <View style={styles.modalCard}>
-              <View style={styles.modalHeader}><View style={styles.aiBadge}><StudyIcon name="sparkles" size={18} /></View><View style={styles.grow}><Text style={styles.modalTitle}>Create with AI</Text><Text style={styles.cardCopy}>{topicName} · review and edit before saving</Text></View></View>
-              {!generatedDrafts ? <>
-                <Text style={styles.fieldLabel}>NUMBER OF QUESTIONS</Text>
-                <View style={styles.choiceRow}>{[5, 10, 20, 30, 50].map((count) => <Pressable key={count} accessibilityRole="button" accessibilityState={{ selected: questionCount === count }} onPress={() => setQuestionCount(count)} style={[styles.choice, questionCount === count && styles.choiceSelected]}><Text style={[styles.choiceText, questionCount === count && styles.choiceTextSelected]}>{count}</Text></Pressable>)}</View>
-                <Text style={styles.fieldLabel}>DIFFICULTY</Text>
-                <View style={styles.choiceRow}>{(['easy', 'medium', 'hard'] as const).map((level) => <Pressable key={level} accessibilityRole="button" accessibilityState={{ selected: difficulty === level }} onPress={() => setDifficulty(level)} style={[styles.choice, difficulty === level && styles.choiceSelected]}><Text style={[styles.choiceText, difficulty === level && styles.choiceTextSelected]}>{level[0].toUpperCase() + level.slice(1)}</Text></Pressable>)}</View>
-                <Text style={styles.fieldLabel}>COURSE MATERIAL (OPTIONAL)</Text>
-                <TextInput value={sourceMaterial} onChangeText={setSourceMaterial} style={[styles.textInput, styles.notesInput]} placeholder="Paste lecture notes or learning objectives" placeholderTextColor={appColor('#91A2AE', 'text')} multiline maxLength={20000} />
-                <Text style={styles.cardCopy}>The AI also uses earlier questions and saved difficulty ratings to reduce repetition and focus on topics marked Again or Hard.</Text>
-                {generating ? <View style={styles.progressStatus}><ActivityIndicator color={appColor('#328FB5', 'text')} /><Text style={styles.cardCopy}>Generating questions… {generationProgress} of {questionCount}</Text></View> : null}
-                <View style={styles.modalActions}>
-                  <Pressable disabled={generating} onPress={() => setAIModalVisible(false)} style={styles.secondaryButton}><Text style={styles.secondaryButtonText}>Cancel</Text></Pressable>
-                  <Pressable disabled={generating} onPress={() => { void generateQuestions(); }} style={styles.primaryButton}><Text style={styles.primaryButtonText}>{generating ? 'Generating…' : 'Generate questions'}</Text></Pressable>
+        <View style={ui.modalBackdrop}>
+          <ScrollView style={styles.modalMax} contentContainerStyle={styles.modalScroll} keyboardShouldPersistTaps="handled" keyboardDismissMode={Platform.OS === 'ios' ? 'interactive' : 'on-drag'} automaticallyAdjustKeyboardInsets={Platform.OS === 'ios'}>
+            <View style={ui.modalCard}>
+              <View style={ui.modalHeader}>
+                <View style={ui.modalIcon}><StudyIcon name="sparkles" size={18} color={palette.accent} /></View>
+                <View style={ui.grow}>
+                  <Text style={ui.modalTitle}>{drafts ? L('Check the questions', 'Se over spørsmålene') : L('Create questions with AI', 'Lag spørsmål med AI')}</Text>
+                  <Text style={ui.cardDescription} numberOfLines={2}>{drafts ? L('Edit or remove anything before saving. Nothing is saved yet.', 'Rediger eller fjern før du lagrer. Ingenting er lagret ennå.') : [topicName, subjectName].filter(Boolean).join(' · ')}</Text>
                 </View>
-              </> : <>
-                <Text style={styles.cardCopy}>Review and edit these suggestions. Nothing is saved until you choose Save questions.</Text>
-                {generatedDrafts.map((draft, index) => <View key={`draft-${index}`} style={styles.draftCard}>
-                  <View style={styles.draftHeader}><Text style={styles.fieldLabel}>QUESTION {index + 1}</Text><Pressable accessibilityRole="button" onPress={() => setGeneratedDrafts((items) => items?.filter((_, itemIndex) => itemIndex !== index) ?? null)}><StudyIcon name="x" size={18} /></Pressable></View>
-                  <TextInput value={draft.question} onChangeText={(value) => setGeneratedDrafts((items) => items?.map((item, itemIndex) => itemIndex === index ? { ...item, question: value } : item) ?? null)} style={styles.textInput} multiline />
-                  <Text style={styles.fieldLabel}>ANSWER</Text>
-                  <TextInput value={draft.answer} onChangeText={(value) => setGeneratedDrafts((items) => items?.map((item, itemIndex) => itemIndex === index ? { ...item, answer: value } : item) ?? null)} style={[styles.textInput, styles.answerDraft]} multiline />
-                </View>)}
-                <View style={styles.modalActions}>
-                  <Pressable onPress={() => setGeneratedDrafts(null)} style={styles.secondaryButton}><Text style={styles.secondaryButtonText}>Generate again</Text></Pressable>
-                  <Pressable disabled={saving || generatedDrafts.length === 0} onPress={() => { void saveGeneratedQuestions(); }} style={styles.primaryButton}><Text style={styles.primaryButtonText}>{saving ? 'Saving…' : `Save ${generatedDrafts.length} questions`}</Text></Pressable>
+              </View>
+
+              {!drafts ? (
+                <>
+                  <Text style={ui.fieldLabel}>{L('HOW MANY QUESTIONS', 'ANTALL SPØRSMÅL')}</Text>
+                  <Chips value={String(aiCount)} onChange={(value) => setAICount(Number(value))} items={AI_COUNT_CHOICES.map((value) => ({ key: String(value), label: String(value) }))} />
+                  <Text style={ui.fieldLabel}>{L('DIFFICULTY', 'VANSKELIGHETSGRAD')}</Text>
+                  <Chips<Difficulty> value={difficulty} onChange={setDifficulty} items={(['easy', 'medium', 'hard'] as const).map((level) => ({ key: level, label: difficultyLabel[level] }))} />
+                  <TopicNotesField state={topicNotes} disabled={generating} />
+                  <Text style={p.small}>{L('AI avoids questions you already have and focuses on what you rated Again or Hard.', 'AI unngår spørsmål du allerede har, og legger vekt på det du har vurdert som Igjen eller Vanskelig.')}</Text>
+                  {generating ? <View style={styles.inline}><ActivityIndicator color={palette.accent} /><Text style={p.body}>{L(`Creating ${generated} of ${aiCount} questions`, `Lager ${generated} av ${aiCount} spørsmål`)}</Text></View> : null}
+                </>
+              ) : drafts.map((draft, draftIndex) => (
+                <View key={draft.key} style={styles.draft}>
+                  <View style={styles.draftTop}>
+                    <Text style={ui.fieldLabel}>{L('QUESTION', 'SPØRSMÅL')} {draftIndex + 1}</Text>
+                    <Pressable accessibilityRole="button" accessibilityLabel={L('Remove question', 'Fjern spørsmål')} onPress={() => setDrafts((items) => (items ?? []).filter((item) => item.key !== draft.key))} hitSlop={10}>
+                      <StudyIcon name="x" size={15} color={ink.muted} />
+                    </Pressable>
+                  </View>
+                  <TextInput value={draft.question} onChangeText={(value) => setDrafts((items) => (items ?? []).map((item) => (item.key === draft.key ? { ...item, question: value } : item)))} style={[ui.textInput, styles.draftInput]} multiline accessibilityLabel={L('Question', 'Spørsmål')} />
+                  <TextInput value={draft.answer} onChangeText={(value) => setDrafts((items) => (items ?? []).map((item) => (item.key === draft.key ? { ...item, answer: value } : item)))} style={[ui.textInput, styles.draftInput]} multiline accessibilityLabel={L('Answer', 'Svar')} />
                 </View>
-              </>}
+              ))}
+
+              {aiError ? <Text style={ui.formError}>{aiError}</Text> : null}
+              <View style={ui.modalActions}>
+                <Pressable accessibilityRole="button" style={ui.secondaryButton} onPress={closeAI} disabled={generating || saving}><Text style={ui.secondaryButtonText}>{drafts ? L('Discard', 'Forkast') : L('Cancel', 'Avbryt')}</Text></Pressable>
+                {drafts ? (
+                  <Pressable accessibilityRole="button" style={[ui.primaryButton, (saving || drafts.length === 0) && ui.disabled]} onPress={() => { void saveDrafts(); }} disabled={saving || drafts.length === 0}>
+                    {saving ? <ActivityIndicator color="#FFFFFF" /> : <Text style={ui.primaryButtonText}>{L(`Save ${drafts.length} questions`, `Lagre ${drafts.length} spørsmål`)}</Text>}
+                  </Pressable>
+                ) : (
+                  <Pressable accessibilityRole="button" style={[ui.primaryButton, generating && ui.disabled]} onPress={() => { void generate(); }} disabled={generating}>
+                    <Text style={ui.primaryButtonText}>{L('Create questions', 'Lag spørsmål')}</Text>
+                  </Pressable>
+                )}
+              </View>
             </View>
           </ScrollView>
         </View>
@@ -308,165 +522,190 @@ export default function ActiveRecallScreen() {
     </Modal>
   );
 
-  return (
-    <SafeAreaView style={styles.container} edges={['top']}>
-      <Stack.Screen options={{ headerShown: false }} />
-      <KeyboardAvoidingView style={styles.flex} behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
-        <PullToRefreshScrollView contentContainerStyle={styles.content} showsVerticalScrollIndicator={false} onRefresh={() => loadQuestions()}>
-          <Pressable style={styles.backButton} onPress={() => router.back()}><Text style={styles.backText}>‹  Study</Text></Pressable>
-          <View style={styles.pageHeader}>
-            <View style={styles.headerIcon}><StudyIcon name="brain" size={24} /></View>
-            <View style={styles.grow}><Text style={styles.title}>Active Recall</Text><Text style={styles.subtitle}>{topicName}</Text></View>
+  // ----- Start page -----
+  let body;
+  if (loading) {
+    body = <View style={styles.state}><ActivityIndicator color={palette.accent} /></View>;
+  } else if (loadFailed) {
+    body = <View style={styles.state}><Text style={[p.body, styles.centered]}>{L('The questions could not be loaded. Pull down to try again.', 'Spørsmålene kunne ikke lastes inn. Dra ned for å prøve igjen.')}</Text></View>;
+  } else if (questions.length === 0) {
+    body = (
+      <View style={[p.card, p.empty]}>
+        <IconChip name="brain" />
+        <Text style={p.emptyTitle}>{L('No questions yet', 'Ingen spørsmål ennå')}</Text>
+        <Text style={[p.body, studyStyles.centered]}>{L('Open questions you answer from memory. Let AI write them from your course material, or write your own.', 'Åpne spørsmål du svarer på fra hukommelsen. La AI skrive dem fra pensumet ditt, eller skriv dine egne.')}</Text>
+        <Pressable accessibilityRole="button" onPress={openAI} style={({ pressed }) => [p.button, styles.wide, styles.buttonRow, { backgroundColor: palette.accent }, pressed && p.pressed]}>
+          <StudyIcon name="sparkles" size={16} color="#FFFFFF" /><Text style={p.buttonText}>{L('Create with AI', 'Lag med AI')}</Text>
+        </Pressable>
+        <Pressable accessibilityRole="button" onPress={() => openEditor(null)} style={({ pressed }) => [p.outlineButton, styles.wide, pressed && p.pressed]}>
+          <Text style={p.outlineButtonText}>{L('Write a question', 'Skriv et spørsmål')}</Text>
+        </Pressable>
+      </View>
+    );
+  } else {
+    const shown = showAll ? questions : questions.slice(0, PREVIEW_QUESTIONS);
+    body = (
+      <>
+        <View style={[p.card, p.row]}>
+          <IconChip name={dueCount ? 'brain' : 'check'} />
+          <View style={p.grow}>
+            <Text style={styles.rowTitle}>{dueCount ? L(`${dueCount} ${dueCount === 1 ? 'question' : 'questions'} due now`, `${dueCount} spørsmål har forfalt`) : L('Nothing due right now', 'Ingenting har forfalt nå')}</Text>
+            <Text style={p.small}>{dueCount ? L('Answer them to keep them in memory.', 'Svar på dem for å holde dem i minnet.') : L('You can still practise below.', 'Du kan fortsatt øve nedenfor.')}</Text>
           </View>
-          {error ? <View style={styles.errorCard}><Text style={styles.errorText}>{error}</Text><Pressable onPress={() => { void loadQuestions(true); }}><Text style={styles.retryText}>Try again</Text></Pressable></View> : null}
-          {loading ? <View style={styles.loading}><ActivityIndicator color={appColor('#328FB5', 'text')} /><Text style={styles.cardCopy}>Loading saved questions…</Text></View> : sessionFinished ? (
-            <View style={styles.finishedCard}>
-              <View style={styles.finishedIcon}><StudyIcon name="check" size={24} /></View>
-              <Text style={styles.sectionTitle}>Session complete</Text>
-              <Text style={styles.cardCopy}>{topicName} · {sessionQuestions.length} question{sessionQuestions.length === 1 ? '' : 's'} · {Math.max(1, Math.round((Date.now() - sessionStartedAt) / 60_000))} min</Text>
-              <View style={styles.summaryGrid}>{(['again', 'hard', 'good', 'easy'] as RecallRating[]).map((rating) => <View key={rating} style={styles.summaryTile}><Text style={styles.summaryValue}>{counts[rating]}</Text><Text style={styles.summaryLabel}>{ratingLabel(rating)}</Text></View>)}</View>
-              <Text style={styles.cardCopy}>Your ratings are saved on each question and will shape future review timing and study recommendations.</Text>
-              <Pressable style={styles.primaryWide} onPress={() => { setSessionFinished(false); setSessionQuestions([]); setRatings([]); void loadQuestions(); }}><Text style={styles.primaryButtonText}>Done</Text></Pressable>
+          {dueCount ? <PillButton label={L('Start', 'Start')} onPress={() => beginSession(buildRecallQueue(questions, { mode: 'due' }))} /> : null}
+        </View>
+
+        <View style={p.card}>
+          <View style={p.cardHeader}>
+            <Text style={p.cardTitle}>{L('Active Recall progress', 'Fremgang med Active Recall')}</Text>
+            <Text style={styles.percent}>{recallProgress}%</Text>
+          </View>
+          <ProgressBar value={recallProgress} color={palette.accent} trackColor={palette.track} height={8} />
+          <View style={styles.stats}>
+            <View style={styles.stat}><Text style={styles.statValue}>{remembered.answers}</Text><Text style={styles.statLabel}>{L('Answers', 'Svar')}</Text></View>
+            <View style={styles.statDivider} />
+            <View style={styles.stat}><Text style={styles.statValue}>{remembered.rate === null ? '–' : `${remembered.rate}%`}</Text><Text style={styles.statLabel}>{L('Remembered', 'Husket')}</Text></View>
+            <View style={styles.statDivider} />
+            <View style={styles.stat}><Text style={styles.statValue}>{difficultCount}</Text><Text style={styles.statLabel}>{L('Difficult', 'Vanskelige')}</Text></View>
+          </View>
+        </View>
+
+        <SectionHeader title={L('Practice settings', 'Innstillinger for øving')} />
+        <View style={p.card}>
+          <Text style={styles.settingLabel}>{L('What to practise', 'Hva du vil øve på')}</Text>
+          <Chips<RecallMode>
+            value={activeMode}
+            onChange={setMode}
+            items={[
+              { key: 'due', label: `${L('Due', 'Forfalte')} (${dueCount})` },
+              { key: 'difficult', label: `${L('Difficult', 'Vanskelige')} (${difficultCount})` },
+              { key: 'all', label: `${L('All', 'Alle')} (${questions.length})` },
+            ]}
+          />
+          <Text style={styles.settingLabel}>{L('Number of questions', 'Antall spørsmål')}</Text>
+          <Chips value={sessionCount} onChange={setSessionCount} items={SESSION_COUNT_CHOICES.map((value) => ({ key: value, label: value === '0' ? L('All', 'Alle') : value }))} />
+          <View style={styles.toggle}>
+            <View style={p.grow}>
+              <Text style={styles.settingLabel}>{L('Write my answer first', 'Skriv svaret mitt først')}</Text>
+              <Text style={p.small}>{L('Type what you remember, then compare with the answer.', 'Skriv det du husker, og sammenlign med svaret.')}</Text>
             </View>
-          ) : sessionQuestions.length > 0 && currentQuestion ? (
-            <>
-              <View style={styles.sessionHeader}><Text style={styles.fieldLabel}>QUESTION {sessionIndex + 1} OF {sessionQuestions.length}</Text><Pressable onPress={() => { setSessionQuestions([]); setShowAnswer(false); }}><Text style={styles.exitSession}>End session</Text></Pressable></View>
-              <View style={styles.progressTrack}><View style={[styles.progressFill, { width: `${Math.round(((sessionIndex + 1) / sessionQuestions.length) * 100)}%` }]} /></View>
-              <View style={styles.questionCard}>
-                <Text style={styles.fieldLabel}>QUESTION</Text>
-                <Text style={styles.questionText}>{currentQuestion.question}</Text>
-                {!showAnswer ? <Pressable style={styles.primaryWide} onPress={() => setShowAnswer(true)}><Text style={styles.primaryButtonText}>Show answer</Text></Pressable> : <>
-                  <View style={styles.answerBox}><Text style={styles.fieldLabel}>ANSWER</Text><Text style={styles.answerText}>{currentQuestion.answer}</Text></View>
-                  <Text style={styles.ratingQuestion}>How well did you remember it?</Text>
-                  <Text style={styles.cardCopy}>This rating schedules the next review: Again in 1 day, Hard in 2, Good in 4 or Easy in 7.</Text>
-                  <View style={styles.ratingGrid}>{(['again', 'hard', 'good', 'easy'] as RecallRating[]).map((rating) => <Pressable key={rating} disabled={saving} onPress={() => { void rateQuestion(rating); }} style={[styles.ratingButton, styles[`rating_${rating}`]]}><Text style={styles.ratingTitle}>{ratingLabel(rating)}</Text><Text style={styles.ratingWhen}>{RATING_DAYS[rating]} day{RATING_DAYS[rating] === 1 ? '' : 's'}</Text></Pressable>)}</View>
-                </>}
-                {saving ? <View style={styles.saving}><ActivityIndicator color={appColor('#328FB5', 'text')} /><Text style={styles.cardCopy}>Saving your rating…</Text></View> : null}
-              </View>
-            </>
-          ) : <>
-            <View style={styles.statsCard}>
-              <View style={styles.stat}><Text style={styles.statValue}>{questions.length}</Text><Text style={styles.statLabel}>Saved</Text></View>
-              <View style={styles.statDivider} />
-              <View style={styles.stat}><Text style={styles.statValue}>{dueQuestions.length}</Text><Text style={styles.statLabel}>Due now</Text></View>
-              <View style={styles.statDivider} />
-              <View style={styles.stat}><Text style={styles.statValue}>{questions.reduce((sum, item) => sum + (item.againCount ?? 0) + (item.hardCount ?? 0), 0)}</Text><Text style={styles.statLabel}>Again / Hard</Text></View>
+            <Switch accessibilityLabel={L('Write my answer first', 'Skriv svaret mitt først')} value={writeFirst} onValueChange={setWriteFirst} trackColor={{ false: '#C9D6DC', true: palette.accent }} ios_backgroundColor="#C9D6DC" />
+          </View>
+        </View>
+        <Pressable accessibilityRole="button" disabled={available === 0} onPress={startSession} style={({ pressed }) => [p.button, styles.big, styles.buttonRow, { backgroundColor: palette.accent }, available === 0 && ui.disabled, pressed && p.pressed]}>
+          <StudyIcon name="play" size={15} color="#FFFFFF" />
+          <Text style={styles.bigText}>{available === 0 ? L('No questions in this selection', 'Ingen spørsmål i dette utvalget') : L(`Start with ${available} ${available === 1 ? 'question' : 'questions'}`, `Start med ${available} spørsmål`)}</Text>
+        </Pressable>
+
+        <SectionHeader title={`${L('Your questions', 'Spørsmålene dine')} (${questions.length})`} action={questions.length > PREVIEW_QUESTIONS ? (showAll ? L('Show fewer', 'Vis færre') : L('See all', 'Se alle')) : undefined} onAction={() => setShowAll((value) => !value)} />
+        <View style={styles.buttonRow}>
+          <Pressable accessibilityRole="button" onPress={openAI} style={({ pressed }) => [p.outlineButton, p.grow, styles.buttonRow, pressed && p.pressed]}>
+            <StudyIcon name="sparkles" size={15} color={palette.accent} /><Text style={p.outlineButtonText}>{L('Create with AI', 'Lag med AI')}</Text>
+          </Pressable>
+          <Pressable accessibilityRole="button" onPress={() => openEditor(null)} style={({ pressed }) => [p.outlineButton, p.grow, styles.buttonRow, pressed && p.pressed]}>
+            <StudyIcon name="plus" size={15} color={palette.accent} /><Text style={p.outlineButtonText}>{L('Add question', 'Legg til spørsmål')}</Text>
+          </Pressable>
+        </View>
+        {shown.map((question) => {
+          const next = question.nextReviewAt ? new Date(question.nextReviewAt) : null;
+          const when = isRecallDue(question) || !next
+            ? L('Due now', 'Forfalt nå')
+            : `${L('Next review', 'Neste repetisjon')} ${next.toLocaleDateString(locale, { day: 'numeric', month: 'short' })}`;
+          return (
+            <View key={question.id} style={styles.questionRow}>
+              <Pressable accessibilityRole="button" accessibilityLabel={L('Edit question', 'Rediger spørsmål')} onPress={() => openEditor(question)} style={({ pressed }) => [p.grow, pressed && p.pressed]}>
+                <Text style={styles.rowQuestion} numberOfLines={2}>{question.question}</Text>
+                <Text style={p.small} numberOfLines={2}>{question.answer}</Text>
+                <Text style={styles.rowMeta}>
+                  {when}
+                  {isRecallDifficult(question) ? ` · ${L('Difficult', 'Vanskelig')}` : ''}
+                  {question.createdBy === 'ai' ? ` · ${L('Made with AI', 'Laget med AI')}` : ''}
+                </Text>
+              </Pressable>
+              <Pressable accessibilityRole="button" accessibilityLabel={L('Delete question', 'Slett spørsmål')} onPress={() => deleteQuestion(question)} style={({ pressed }) => [styles.delete, pressed && p.pressed]} hitSlop={8}>
+                <StudyIcon name="trash" size={17} color={ink.muted} />
+              </Pressable>
             </View>
-            <View style={styles.actionsRow}>
-              <Pressable style={styles.aiButton} onPress={() => { setAIModalVisible(true); setGeneratedDrafts(null); }}><StudyIcon name="sparkles" size={18} color="#FFFFFF" /><Text style={styles.primaryButtonText}>Create with AI</Text></Pressable>
-              <Pressable style={styles.addButton} onPress={openCreateQuestion}><StudyIcon name="plus" size={18} /><Text style={styles.addButtonText}>Add</Text></Pressable>
-            </View>
-            {dueQuestions.length ? <Pressable style={styles.primaryWide} onPress={() => startSession(false)}><Text style={styles.primaryButtonText}>Start review · {dueQuestions.length} due</Text></Pressable> : questions.length ? <View style={styles.caughtUpCard}><StudyIcon name="check" size={19} /><View style={styles.grow}><Text style={styles.caughtUpTitle}>You’re up to date</Text><Text style={styles.cardCopy}>Your next review dates are saved with each question.</Text></View></View> : null}
-            {!dueQuestions.length && questions.length ? <Pressable style={styles.secondaryWide} onPress={() => startSession(true)}><Text style={styles.secondaryButtonText}>Study all questions</Text></Pressable> : null}
-            {questions.length === 0 ? <View style={styles.emptyCard}>
-              <View style={styles.emptyIcon}><StudyIcon name="brain" size={26} /></View><Text style={styles.sectionTitle}>No questions yet</Text><Text style={styles.cardCopy}>Create a few questions yourself or ask AI to draft some for this topic. You can edit everything before saving.</Text>
-            </View> : null}
-            {questions.length ? <>
-              <View style={styles.listHeading}><View><Text style={styles.sectionTitle}>Your questions</Text><Text style={styles.cardCopy}>Saved to this topic on this device and included in cloud backup.</Text></View><Text style={styles.countBadge}>{questions.length}</Text></View>
-              {questions.map((question) => {
-                const due = isDue(question);
-                const nextDate = question.nextReviewAt ? new Date(question.nextReviewAt) : null;
-                return <View key={question.id} style={styles.questionRow}>
-                  <View style={styles.grow}><Text style={styles.listQuestion} numberOfLines={2}>{question.question}</Text><Text style={styles.cardCopy}>{due ? 'Ready to review' : `Next review ${nextDate?.toLocaleDateString(undefined, { day: 'numeric', month: 'short' })}`} · {question.createdBy === 'ai' ? 'AI draft' : 'Manual'}</Text></View>
-                  <Pressable accessibilityRole="button" accessibilityLabel="Edit question" onPress={() => openEditQuestion(question)} style={styles.iconButton}><StudyIcon name="book" size={16} /></Pressable>
-                  <Pressable accessibilityRole="button" accessibilityLabel="Delete question" onPress={() => deleteQuestion(question)} style={styles.iconButton}><StudyIcon name="x" size={16} /></Pressable>
-                </View>;
-              })}
-            </> : null}
-          </>}
-        </PullToRefreshScrollView>
-      </KeyboardAvoidingView>
-      {manualModal}
+          );
+        })}
+      </>
+    );
+  }
+
+  return (
+    <SafeAreaView style={ui.container} edges={['top']}>
+      <Stack.Screen options={{ headerShown: false }} />
+      <PullToRefreshScrollView contentContainerStyle={studyStyles.content} showsVerticalScrollIndicator={false} onRefresh={async () => { await Promise.all([loadQuestions(), reload()]); }}>
+        <ScreenBar backLabel={L('Back', 'Tilbake')} />
+        <View>
+          <Text style={styles.title} accessibilityRole="header">Active Recall</Text>
+          <Text style={styles.subtitle} numberOfLines={1}>{[topicName, subjectName].filter(Boolean).join(' · ')}</Text>
+        </View>
+        {body}
+      </PullToRefreshScrollView>
+      {editor}
       {aiModal}
     </SafeAreaView>
   );
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: appColor('#F7FBFE', 'background') },
-  flex: { flex: 1 },
-  content: { paddingHorizontal: 20, paddingTop: 10, paddingBottom: 36, gap: 15 },
-  backButton: { alignSelf: 'flex-start', paddingVertical: 5 },
-  backText: { color: appColor('#3684A2', 'text'), fontSize: 14, fontWeight: '700' },
-  pageHeader: { flexDirection: 'row', gap: 12, alignItems: 'center' },
-  headerIcon: { width: 48, height: 48, borderRadius: 15, backgroundColor: appColor('#E8F5FA', 'background'), alignItems: 'center', justifyContent: 'center' },
-  grow: { flex: 1 },
-  title: { color: appColor('#17324D', 'text'), fontSize: 26, fontWeight: '800' },
-  subtitle: { color: appColor('#738795', 'text'), fontSize: 14, marginTop: 3 },
-  statsCard: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-around', paddingVertical: 15, borderRadius: 18, backgroundColor: appColor('#FFFFFF', 'background'), borderWidth: 1, borderColor: appColor('#E6EDF1', 'border') },
-  stat: { alignItems: 'center', gap: 3, flex: 1 },
-  statValue: { color: appColor('#17324D', 'text'), fontSize: 20, fontWeight: '800' },
-  statLabel: { color: appColor('#778B98', 'text'), fontSize: 10, fontWeight: '700' },
-  statDivider: { width: 1, height: 32, backgroundColor: appColor('#E5EDF1', 'border') },
-  actionsRow: { flexDirection: 'row', gap: 10 },
-  aiButton: { flex: 1, minHeight: 46, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8, backgroundColor: '#328FB5', borderRadius: 14 },
-  addButton: { minWidth: 82, minHeight: 46, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 5, backgroundColor: appColor('#FFFFFF', 'background'), borderRadius: 14, borderWidth: 1, borderColor: appColor('#DDE8ED', 'border') },
-  addButtonText: { color: appColor('#337F9E', 'text'), fontSize: 13, fontWeight: '800' },
-  primaryWide: { minHeight: 48, borderRadius: 14, alignItems: 'center', justifyContent: 'center', backgroundColor: '#328FB5', paddingHorizontal: 14 },
-  primaryButtonText: { color: '#FFFFFF', fontSize: 13, fontWeight: '800' },
-  secondaryWide: { minHeight: 46, borderRadius: 14, alignItems: 'center', justifyContent: 'center', backgroundColor: appColor('#FFFFFF', 'background'), borderWidth: 1, borderColor: appColor('#DDE8ED', 'border') },
-  secondaryButtonText: { color: appColor('#3E778F', 'text'), fontSize: 13, fontWeight: '800' },
-  caughtUpCard: { flexDirection: 'row', alignItems: 'center', gap: 10, padding: 14, backgroundColor: appColor('#EAF7F1', 'background'), borderRadius: 15 },
-  caughtUpTitle: { color: appColor('#265C4D', 'text'), fontSize: 13, fontWeight: '800' },
-  sectionTitle: { color: appColor('#17324D', 'text'), fontSize: 17, fontWeight: '800' },
-  cardCopy: { color: appColor('#748895', 'text'), fontSize: 12, lineHeight: 18, marginTop: 3 },
-  emptyCard: { alignItems: 'center', gap: 8, padding: 22, backgroundColor: appColor('#FFFFFF', 'background'), borderWidth: 1, borderColor: appColor('#E6EDF1', 'border'), borderRadius: 18 },
-  emptyIcon: { width: 54, height: 54, borderRadius: 17, alignItems: 'center', justifyContent: 'center', backgroundColor: appColor('#EEF7FA', 'background') },
-  listHeading: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginTop: 8 },
-  countBadge: { color: appColor('#3F7E98', 'text'), fontSize: 12, fontWeight: '800', backgroundColor: appColor('#E8F4F8', 'background'), borderRadius: 10, paddingHorizontal: 9, paddingVertical: 5 },
-  questionRow: { flexDirection: 'row', alignItems: 'center', gap: 8, backgroundColor: appColor('#FFFFFF', 'background'), borderRadius: 15, borderWidth: 1, borderColor: appColor('#E6EDF1', 'border'), padding: 11 },
-  listQuestion: { color: appColor('#17324D', 'text'), fontSize: 13, fontWeight: '700', lineHeight: 19 },
-  iconButton: { width: 34, height: 34, borderRadius: 11, backgroundColor: appColor('#F1F7F9', 'background'), alignItems: 'center', justifyContent: 'center' },
-  sessionHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
-  fieldLabel: { color: appColor('#77909F', 'text'), fontSize: 10, fontWeight: '800', letterSpacing: 0.8, marginBottom: 7 },
-  exitSession: { color: appColor('#4A8199', 'text'), fontSize: 12, fontWeight: '700' },
-  progressTrack: { height: 7, backgroundColor: appColor('#DFEAF0', 'background'), borderRadius: 8, overflow: 'hidden' },
-  progressFill: { height: '100%', borderRadius: 8, backgroundColor: '#45A1C3' },
-  questionCard: { padding: 18, gap: 13, borderRadius: 20, backgroundColor: appColor('#FFFFFF', 'background'), borderWidth: 1, borderColor: appColor('#E6EDF1', 'border') },
-  questionText: { color: appColor('#17324D', 'text'), fontSize: 21, fontWeight: '700', lineHeight: 30, marginBottom: 3 },
-  answerBox: { gap: 5, padding: 14, borderRadius: 14, backgroundColor: appColor('#EFF8FB', 'background') },
-  answerText: { color: appColor('#29495D', 'text'), fontSize: 15, lineHeight: 23 },
-  ratingQuestion: { color: appColor('#17324D', 'text'), fontSize: 14, fontWeight: '800', marginTop: 3 },
-  ratingGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
-  ratingButton: { flexGrow: 1, flexBasis: '45%', alignItems: 'center', justifyContent: 'center', paddingVertical: 12, borderRadius: 13, borderWidth: 1 },
-  rating_again: { backgroundColor: appColor('#FFF3F1', 'background'), borderColor: appColor('#F4D8D2', 'border') },
-  rating_hard: { backgroundColor: appColor('#FFF8ED', 'background'), borderColor: appColor('#F0E1C8', 'border') },
-  rating_good: { backgroundColor: appColor('#EFF8FC', 'background'), borderColor: appColor('#D5EAF3', 'border') },
-  rating_easy: { backgroundColor: appColor('#EFF8F3', 'background'), borderColor: appColor('#D4EADF', 'border') },
-  ratingTitle: { color: appColor('#29495D', 'text'), fontSize: 13, fontWeight: '800' },
-  ratingWhen: { color: appColor('#788B97', 'text'), fontSize: 10, marginTop: 3 },
-  saving: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8 },
-  finishedCard: { alignItems: 'center', gap: 9, padding: 20, backgroundColor: appColor('#FFFFFF', 'background'), borderWidth: 1, borderColor: appColor('#E6EDF1', 'border'), borderRadius: 20 },
-  finishedIcon: { width: 48, height: 48, borderRadius: 16, backgroundColor: appColor('#EAF7F1', 'background'), alignItems: 'center', justifyContent: 'center' },
-  summaryGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, width: '100%', marginVertical: 7 },
-  summaryTile: { flex: 1, minWidth: '43%', alignItems: 'center', padding: 12, backgroundColor: appColor('#F5F9FB', 'background'), borderRadius: 13 },
-  summaryValue: { color: appColor('#17324D', 'text'), fontSize: 19, fontWeight: '800' },
-  summaryLabel: { color: appColor('#718594', 'text'), fontSize: 11, marginTop: 3 },
-  errorCard: { padding: 14, borderRadius: 14, backgroundColor: appColor('#FFF2F0', 'background') },
-  errorText: { color: appColor('#9B3C34', 'text'), fontSize: 13 },
-  retryText: { color: appColor('#327E9D', 'text'), fontWeight: '800', marginTop: 6 },
-  loading: { alignItems: 'center', gap: 9, padding: 28 },
+  title: { color: ink.primary, fontSize: 30, fontWeight: '800', letterSpacing: -0.4 },
+  subtitle: { color: ink.secondary, fontSize: 14, marginTop: 2 },
+  state: { alignItems: 'center', paddingVertical: 60 },
+  wide: { alignSelf: 'stretch' },
+  centered: { textAlign: 'center' },
+  buttonRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8 },
+  inline: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  rowTitle: { color: ink.primary, fontSize: 16, fontWeight: '800' },
+  percent: { color: ink.primary, fontSize: 18, fontWeight: '800' },
+  stats: { flexDirection: 'row', alignItems: 'stretch' },
+  stat: { flex: 1, alignItems: 'center', gap: 3 },
+  statDivider: { width: StyleSheet.hairlineWidth, backgroundColor: appColor('#D8E6EC', 'border') },
+  statValue: { color: ink.primary, fontSize: 19, fontWeight: '800' },
+  statLabel: { color: ink.muted, fontSize: 11 },
+  settingLabel: { color: ink.primary, fontSize: 14, fontWeight: '600' },
+  toggle: { flexDirection: 'row', alignItems: 'center', gap: 12 },
+  big: { minHeight: 56, borderRadius: 18 },
+  bigText: { color: '#FFFFFF', fontSize: 16, fontWeight: '800' },
+  questionRow: { flexDirection: 'row', alignItems: 'center', gap: 10, padding: 14, borderRadius: 16, backgroundColor: appColor('#FFFFFF', 'background'), borderWidth: 1, borderColor: appColor('#E7F0F4', 'border'), ...cardShadow },
+  rowQuestion: { color: ink.primary, fontSize: 14, fontWeight: '700', marginBottom: 3 },
+  rowMeta: { color: ink.muted, fontSize: 11, marginTop: 6 },
+  delete: { width: 38, height: 38, borderRadius: 12, alignItems: 'center', justifyContent: 'center', backgroundColor: appColor('#F4F8FA', 'background') },
+
+  page: { flex: 1, paddingHorizontal: 20 },
+  bar: { minHeight: 48, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
+  barButton: { width: 44, height: 44, justifyContent: 'center' },
+  barTitle: { flex: 1, color: ink.primary, fontSize: 16, fontWeight: '800', textAlign: 'center' },
+  progress: { gap: 8, marginTop: 4 },
+  scroll: { flexGrow: 1, paddingVertical: 16, gap: 12 },
+  card: { flexGrow: 1, minHeight: 240, justifyContent: 'center', padding: 22, gap: 10 },
+  side: { color: ink.muted, fontSize: 11, fontWeight: '800', letterSpacing: 1, textTransform: 'uppercase' },
+  question: { color: ink.primary, fontSize: 21, lineHeight: 29, fontWeight: '700' },
+  ownAnswer: { minHeight: 96, marginTop: 8 },
+  ownShown: { marginTop: 4 },
+  divider: { height: StyleSheet.hairlineWidth, backgroundColor: appColor('#D8E6EC', 'border'), marginVertical: 8 },
+  answer: { color: ink.primary, fontSize: 17, lineHeight: 26 },
+  hint: { marginTop: 12 },
+  footer: { gap: 10, paddingTop: 8, paddingBottom: 10 },
+  error: { color: appColor('#A34338', 'text'), fontSize: 13, textAlign: 'center' },
+  ratings: { flexDirection: 'row', gap: 8 },
+  rating: { flex: 1, alignItems: 'center', gap: 4, paddingBottom: 10, borderRadius: 14, overflow: 'hidden', backgroundColor: appColor('#FFFFFF', 'background'), borderWidth: 1, borderColor: appColor('#E7F0F4', 'border'), ...cardShadow },
+  ratingMark: { alignSelf: 'stretch', height: 4, marginBottom: 6 },
+  ratingLabel: { color: ink.primary, fontSize: 14, fontWeight: '800' },
+  ratingWhen: { color: ink.muted, fontSize: 10 },
+  doneCard: { alignItems: 'center', paddingVertical: 26 },
+  doneIcon: { width: 60, height: 60, borderRadius: 30, alignItems: 'center', justifyContent: 'center' },
+  doneTitle: { color: ink.primary, fontSize: 22, fontWeight: '800' },
+  summary: { flexDirection: 'row', alignSelf: 'stretch', marginTop: 6 },
+  summaryItem: { flex: 1, alignItems: 'center', gap: 3 },
+  summaryValue: { color: ink.primary, fontSize: 20, fontWeight: '800' },
+
   modalKeyboard: { flex: 1 },
-  modalBackdrop: { flex: 1, justifyContent: 'flex-end', backgroundColor: 'rgba(14, 31, 43, 0.42)' },
-  modalScroll: { maxHeight: '92%' },
-  modalScrollContent: { flexGrow: 1, justifyContent: 'flex-end', padding: 14 },
-  modalCard: { padding: 18, borderRadius: 22, backgroundColor: appColor('#F9FCFD', 'background'), gap: 9 },
-  modalHeader: { flexDirection: 'row', alignItems: 'center', gap: 10, marginBottom: 6 },
-  aiBadge: { width: 38, height: 38, borderRadius: 13, alignItems: 'center', justifyContent: 'center', backgroundColor: appColor('#E8F5FA', 'background') },
-  modalTitle: { color: appColor('#17324D', 'text'), fontSize: 19, fontWeight: '800' },
-  choiceRow: { flexDirection: 'row', gap: 7 },
-  choice: { flex: 1, alignItems: 'center', justifyContent: 'center', minHeight: 38, backgroundColor: appColor('#FFFFFF', 'background'), borderRadius: 11, borderWidth: 1, borderColor: appColor('#E1E9ED', 'border') },
-  choiceSelected: { backgroundColor: appColor('#E8F5FA', 'background'), borderColor: appColor('#73B5CD', 'border') },
-  choiceText: { color: appColor('#5F7684', 'text'), fontSize: 11, fontWeight: '700' },
-  choiceTextSelected: { color: appColor('#2E7795', 'text') },
-  textInput: { minHeight: 46, paddingHorizontal: 12, paddingVertical: 10, borderRadius: 12, backgroundColor: appColor('#FFFFFF', 'background'), borderWidth: 1, borderColor: appColor('#DFE8EC', 'border'), color: appColor('#17324D', 'text'), fontSize: 14, lineHeight: 20 },
-  multiline: { minHeight: 110, textAlignVertical: 'top' },
-  notesInput: { minHeight: 112, textAlignVertical: 'top' },
-  answerDraft: { minHeight: 68, textAlignVertical: 'top' },
-  modalActions: { flexDirection: 'row', justifyContent: 'flex-end', gap: 9, marginTop: 8 },
-  secondaryButton: { minHeight: 43, paddingHorizontal: 14, borderRadius: 12, backgroundColor: appColor('#EFF4F6', 'background'), alignItems: 'center', justifyContent: 'center' },
-  primaryButton: { minHeight: 43, paddingHorizontal: 15, borderRadius: 12, backgroundColor: '#328FB5', alignItems: 'center', justifyContent: 'center' },
-  progressStatus: { flexDirection: 'row', alignItems: 'center', gap: 9, paddingVertical: 5 },
-  draftCard: { padding: 11, gap: 8, backgroundColor: appColor('#F2F8FA', 'background'), borderRadius: 14, marginTop: 8 },
-  draftHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
+  modalMax: { maxHeight: '92%' },
+  modalScroll: { flexGrow: 1, justifyContent: 'flex-end' },
+  multiline: { minHeight: 76, textAlignVertical: 'top' },
+  draft: { gap: 7, paddingTop: 10, borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: appColor('#D8E6EC', 'border') },
+  draftTop: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
+  draftInput: { minHeight: 44 },
 });

@@ -1,3 +1,4 @@
+import { BackLink } from '@/components/back-link';
 import { LocalizedText as Text } from '@/components/localized-text';
 import { appColor } from '@/constants/adaptive-color';
 import { Stack, router, useLocalSearchParams } from 'expo-router';
@@ -142,7 +143,7 @@ export default function FocusScreen() {
   return <SafeAreaView style={styles.screen}>
     <Stack.Screen options={{ headerShown: false }} />
     <View style={styles.content}>
-      <Pressable style={styles.back} onPress={() => router.back()}><Text style={styles.backText}>‹  Back</Text></Pressable>
+      <BackLink label="Back" />
       <Text style={styles.eyebrow}>FOCUS MODE</Text>
       <Text style={styles.title}>One thing at a time</Text>
       {!ready ? <ActivityIndicator color={appColor('#327E9D', 'text')} style={{ marginTop: 40 }} /> : savedActivityId ? <View style={styles.card}>
@@ -159,14 +160,14 @@ export default function FocusScreen() {
         <Text style={styles.copy}>{session.phase === 'focus' ? 'Keep your attention on this topic. You can pause any time.' : 'Step away for a moment. Your focus time has been kept.'}</Text>
         <Text style={styles.savedTime}>{Math.floor(session.completedWorkSeconds / 60)} focused min · {session.cyclesCompleted} interval{session.cyclesCompleted === 1 ? '' : 's'} completed</Text>
         <View style={styles.actionRow}><Pressable style={styles.secondary} onPress={() => { void togglePause(); }}><Text style={styles.secondaryText}>{session.pausedRemainingSeconds === null ? 'Pause' : 'Resume'}</Text></Pressable><Pressable disabled={saving} style={styles.primary} onPress={() => { void finishSession(); }}><Text style={styles.primaryText}>{saving ? 'Saving…' : 'Finish and save'}</Text></Pressable></View>
-        <Pressable style={styles.toolsLink} onPress={() => router.push({ pathname: '/subject/topic/study', params: { id: session.topicId, name: session.topicName, subjectId: session.subjectId } })}><Text style={styles.toolsText}>Open study tools</Text></Pressable>
+        <Pressable style={styles.toolsLink} onPress={() => router.push({ pathname: '/subject/topic/[id]', params: { id: session.topicId, name: session.topicName, subjectId: session.subjectId } })}><Text style={styles.toolsText}>Open study tools</Text></Pressable>
       </View> : <View style={styles.card}>
         <Text style={styles.phase}>PICK A ROUTINE</Text>
         <Text style={styles.sessionTitle}>{param(params.name) || 'Ready when you are'}</Text>
         {!!param(params.subjectName) && <Text style={styles.subject}>{param(params.subjectName)}</Text>}
         <Text style={styles.copy}>Study for a set interval, then pause for a short break. Your completed focus time is saved to the selected topic.</Text>
         <View style={styles.routineList}>{[preferredRoutine, [25, 5], [45, 10], [50, 10]].filter((routine, index, all) => all.findIndex((item) => item[0] === routine[0] && item[1] === routine[1]) === index).map(([work, rest]) => <Pressable key={`${work}-${rest}`} style={styles.routine} onPress={() => { void start(work, rest); }}><View><Text style={styles.routineTitle}>{work} min focus{work === preferredRoutine[0] && rest === preferredRoutine[1] ? ' · Preferred' : ''}</Text><Text style={styles.routineCopy}>then {rest} min break</Text></View><Text style={styles.arrow}>Start  ›</Text></Pressable>)}</View>
-        <Text style={styles.privacyNote}>This timer helps structure study time. iOS does not let MedExam block other apps without Apple Screen Time approval.</Text>
+        <Text style={styles.privacyNote}>This timer helps structure study time. iOS does not let Medora block other apps without Apple Screen Time approval.</Text>
       </View>}
     </View>
   </SafeAreaView>;

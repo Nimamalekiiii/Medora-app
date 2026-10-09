@@ -1,7 +1,7 @@
 import { appColor } from '@/constants/adaptive-color';
 import { useEffect, useState } from 'react';
 import { ActivityIndicator, Alert } from 'react-native';
-import { SettingsCard, SettingsChoice, SettingsNote, SettingsPage, SettingsToggle } from './shared';
+import { SettingsCard, SettingsChoice, SettingsNote, SettingsPage, SettingsToggle } from '@/components/settings-shared';
 import { DEFAULT_AI_PREFERENCES, getAIPreferences, saveAIPreferences, type AIPreferences } from '../../services/storage';
 
 export default function AISettings() {
@@ -14,7 +14,7 @@ export default function AISettings() {
   }
   return <SettingsPage title="AI preferences" description="Set defaults for AI study materials. You can adjust the number for an individual generation too.">
     {busy ? <ActivityIndicator color={appColor('#327E9D', 'text')} /> : <>
-      <SettingsCard title="Available AI study tools" description="These controls only affect features currently available in MedExam.">
+      <SettingsCard title="Available AI study tools" description="These controls only affect features currently available in Medora.">
         <SettingsToggle title="Generate quizzes" description="Allow AI quiz generation from a topic and optional notes." value={settings.generateQuizzes} onChange={(value) => void update({ generateQuizzes: value })} />
         <SettingsToggle title="Generate flashcards" description="Allow AI flashcard generation from a topic and optional notes." value={settings.generateFlashcards} onChange={(value) => void update({ generateFlashcards: value })} />
       </SettingsCard>

@@ -1,7 +1,7 @@
 import { appColor } from '@/constants/adaptive-color';
 import { useEffect, useState } from 'react';
 import { ActivityIndicator, Alert } from 'react-native';
-import { SettingsCard, SettingsNote, SettingsPage, SettingsToggle } from './shared';
+import { SettingsCard, SettingsNote, SettingsPage, SettingsToggle } from '@/components/settings-shared';
 import { DEFAULT_STUDY_PREFERENCES, getStudyPreferences, saveStudyPreferences, type StudyPreferences } from '../../services/storage';
 
 const OPTIONS: { key: keyof StudyPreferences; label: string; description: string }[] = [
@@ -22,7 +22,7 @@ export default function PlanningSettings() {
     try { await saveStudyPreferences({ [key]: value }); setSettings((current) => ({ ...current, [key]: value })); }
     catch (error) { Alert.alert('Could not save plan preference', error instanceof Error ? error.message : 'Try again.'); }
   }
-  return <SettingsPage title="Study plan" description="Control which priorities guide suggestions. MedExam does not alter completed study activity.">
+  return <SettingsPage title="Study plan" description="Control which priorities guide suggestions. Medora does not alter completed study activity.">
     {busy ? <ActivityIndicator color={appColor('#327E9D', 'text')} /> : <SettingsCard title="Plan behavior" description="These options are saved and included in cloud sync.">
       {OPTIONS.map((option) => <SettingsToggle key={option.key} title={option.label} description={option.description} value={settings[option.key] as boolean} onChange={(value) => void toggle(option.key, value)} />)}
     </SettingsCard>}

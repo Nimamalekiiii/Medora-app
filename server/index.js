@@ -6,17 +6,26 @@ const { analyzeStudyData } = require('./ai/study-analysis');
 const { analyzeProgress } = require('./ai/progress-analysis');
 const { analyzeTopic } = require('./ai/topic-analysis');
 const { generateQuiz, generateFlashcards, generateActiveRecall } = require('./ai/study-material');
+const { extractNotesFromPdf } = require('./ai/notes-from-pdf');
+const { suggestTopics } = require('./ai/topic-suggestions');
 
 const app = express();
+app.disable('x-powered-by');
 const requests = new Map();
 const dailyRequests = new Map();
 const WINDOW_MS = 60_000;
 const DAY_MS = 24 * 60 * 60 * 1000;
 const MAX_REQUESTS_PER_WINDOW = 12;
-const MAX_REQUESTS_PER_DAY = Number(process.env.AI_MAX_REQUESTS_PER_DAY || 30);
+// A long quiz or a big set of flashcards is made in several requests, so a study day needs room for many.
+const MAX_REQUESTS_PER_DAY = Number(process.env.AI_MAX_REQUESTS_PER_DAY || 150);
 
 app.use(cors());
-app.use(express.json({ limit: '64kb' }));
+// Ordinary requests are small. The PDF route reads its larger body only after
+// the sign-in check, so anonymous callers cannot upload large payloads.
+const PDF_ROUTE = '/ai/extract-notes';
+const parseJson = express.json({ limit: '64kb' });
+const parsePdfJson = express.json({ limit: '14mb' });
+app.use((req, res, next) => (req.path === PDF_ROUTE ? next() : parseJson(req, res, next)));
 
 async function authenticateAIUser(req, res, next) {
   const supabaseUrl = (process.env.SUPABASE_URL || '').trim().replace(/\/+$/, '');
@@ -27,7 +36,7 @@ async function authenticateAIUser(req, res, next) {
 
   const authorization = req.get('authorization') || '';
   if (!/^Bearer\s+\S+$/i.test(authorization)) {
-    return res.status(401).json({ success: false, message: 'Sign in to MedExam before using AI study tools.' });
+    return res.status(401).json({ success: false, message: 'Sign in to Medora before using AI study tools.' });
   }
 
   try {
@@ -39,7 +48,7 @@ async function authenticateAIUser(req, res, next) {
       return res.status(401).json({ success: false, message: 'Your sign-in expired. Please sign in again.' });
     }
     if (!response.ok) {
-      return res.status(503).json({ success: false, message: 'MedExam could not verify your sign-in. Please try again.' });
+      return res.status(503).json({ success: false, message: 'Medora could not verify your sign-in. Please try again.' });
     }
     const user = await response.json();
     if (typeof user?.id !== 'string' || !user.id) {
@@ -48,7 +57,7 @@ async function authenticateAIUser(req, res, next) {
     req.userId = user.id;
     return next();
   } catch {
-    return res.status(503).json({ success: false, message: 'MedExam could not verify your sign-in. Check your connection and try again.' });
+    return res.status(503).json({ success: false, message: 'Medora could not verify your sign-in. Check your connection and try again.' });
   }
 }
 
@@ -75,7 +84,7 @@ app.use('/ai', (req, res, next) => authenticateAIUser(req, res, () => {
     for (const [key, entry] of dailyRequests) if (now - entry.startedAt >= DAY_MS) dailyRequests.delete(key);
   }
 
-  const dailyLimit = Number.isInteger(MAX_REQUESTS_PER_DAY) && MAX_REQUESTS_PER_DAY > 0 ? MAX_REQUESTS_PER_DAY : 30;
+  const dailyLimit = Number.isInteger(MAX_REQUESTS_PER_DAY) && MAX_REQUESTS_PER_DAY > 0 ? MAX_REQUESTS_PER_DAY : 150;
   if (dailyCurrent.count > dailyLimit) {
     return res.status(429).json({ success: false, message: 'The daily AI request limit has been reached. Please try again tomorrow.' });
   }
@@ -87,7 +96,7 @@ app.use('/ai', (req, res, next) => authenticateAIUser(req, res, () => {
 }));
 
 app.get('/', (req, res) => {
-  res.json({ message: 'MedExam AI server is running.' });
+  res.json({ message: 'Medora AI server is running.' });
 });
 
 app.get('/health', (req, res) => {
@@ -99,7 +108,7 @@ function sendAIError(res, error, label) {
     return res.status(503).json({ success: false, message: 'AI is not configured on the server yet.' });
   }
 
-  if (/^Enter |^Choose |^Study notes|^Study data |^Study progress /.test(error?.message || '')) {
+  if (/^Enter |^Choose |^Study notes|^Study data |^Study progress |^The PDF |^Topic names |^The AI found no new topics/.test(error?.message || '')) {
     return res.status(400).json({ success: false, message: error.message });
   }
 
@@ -143,6 +152,15 @@ app.post('/ai/generate-quiz', async (req, res) => {
   }
 });
 
+app.post('/ai/suggest-topics', async (req, res) => {
+  try {
+    const result = await suggestTopics(req.body);
+    return res.json({ success: true, ...result });
+  } catch (error) {
+    return sendAIError(res, error, 'Topic suggestion error');
+  }
+});
+
 app.post('/ai/generate-flashcards', async (req, res) => {
   try {
     const result = await generateFlashcards(req.body);
@@ -161,8 +179,20 @@ app.post('/ai/generate-active-recall', async (req, res) => {
   }
 });
 
+app.post(PDF_ROUTE, parsePdfJson, async (req, res) => {
+  try {
+    const result = await extractNotesFromPdf(req.body);
+    return res.json({ success: true, ...result });
+  } catch (error) {
+    return sendAIError(res, error, 'PDF notes error');
+  }
+});
+
 app.use((error, req, res, next) => {
-  if (error?.type === 'entity.too.large' || error instanceof SyntaxError) {
+  if (error?.type === 'entity.too.large') {
+    return res.status(413).json({ success: false, message: req.path === PDF_ROUTE ? 'The PDF is over 10 MB. Choose a smaller file or split it into parts.' : 'The request could not be read.' });
+  }
+  if (error instanceof SyntaxError) {
     return res.status(400).json({ success: false, message: 'The request could not be read.' });
   }
   return next(error);
@@ -170,5 +200,5 @@ app.use((error, req, res, next) => {
 
 const PORT = Number(process.env.PORT || 3000);
 app.listen(PORT, '0.0.0.0', () => {
-  console.log(`MedExam AI server listening on port ${PORT}`);
+  console.log(`Medora AI server listening on port ${PORT}`);
 });

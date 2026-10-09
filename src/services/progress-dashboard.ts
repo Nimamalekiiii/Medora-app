@@ -10,6 +10,7 @@ import type {
   TopicsBySubject,
 } from '../types/study';
 import { calculatePreparationAnalysis } from './study-engine';
+import { calculateTopicMastery } from './topic-mastery';
 
 export type DashboardTopic = Topic & {
   subjectId: string;
@@ -24,7 +25,14 @@ export type DashboardTopic = Topic & {
   reviewSessions: number;
   reviewRatings: { again: number; hard: number; good: number; easy: number };
   methodCoverage: number;
+  /** Different calendar days with any study on the topic. */
+  studyDays: number;
+  /** Topic mastery from 0 to 100, see topic-mastery.ts. */
   practiceProgress: number;
+  /** Whole days since the topic was last studied, or null if never. */
+  daysSinceStudy: number | null;
+  /** Points the score has lost because the topic has not been revised recently. */
+  fadedPoints: number;
   lastStudiedAt: string | null;
 };
 
@@ -332,10 +340,19 @@ export function buildProgressDashboard(input: ProgressInput, now = new Date(), l
         easy: ratings.easy + Math.max(0, activity.easyCount || 0),
       }), { again: 0, hard: 0, good: 0, easy: 0 });
     const started = topicActivities.length > 0 || reviews.length > 0;
-    const practiceProgress = started ? quizAccuracy === null ? methodCoverage : Math.round(methodCoverage * 0.7 + quizAccuracy * 0.3) : 0;
     const lastActivityAt = topicActivities.map((activity) => activity.completedAt).concat(reviews.map((review) => review.reviewedAt)).sort((a, b) => new Date(b).getTime() - new Date(a).getTime())[0] ?? null;
     const reviewStart = new Date(0);
     const flashcardsReviewed = countReviewedCards(topicActivities, reviews, reviewStart);
+    const activeRecallQuestions = topicActivities.filter((activity) => activity.activity === 'active_recall').reduce((sum, activity) => sum + Math.max(0, activity.questionCount || 0), 0);
+    const activeRecallRatings = sumRatings('active_recall');
+    const reviewRatings = sumRatings('review');
+    const studyDays = new Set(topicActivities.map(activityDayKey).concat(reviews.map(reviewDayKey)).filter((value): value is string => value !== null)).size;
+    const lastStudyKey = lastActivityAt ? localDateKey(lastActivityAt) : null;
+    const daysSinceStudy = lastStudyKey ? Math.max(0, -dayDistance(lastStudyKey, today)) : null;
+    const mastery = started
+      ? calculateTopicMastery({ quizQuestions, quizCorrect: correct, activeRecallQuestions, activeRecallRatings, flashcardsReviewed, reviewRatings, studyDays, daysSinceLastStudy: daysSinceStudy })
+      : null;
+    const practiceProgress = mastery?.score ?? 0;
     return {
       ...topic,
       subjectId: String(subject.id),
@@ -344,13 +361,16 @@ export function buildProgressDashboard(input: ProgressInput, now = new Date(), l
       quizAccuracy,
       quizCorrect: correct,
       quizQuestions,
-      activeRecallQuestions: topicActivities.filter((activity) => activity.activity === 'active_recall').reduce((sum, activity) => sum + Math.max(0, activity.questionCount || 0), 0),
-      activeRecallRatings: sumRatings('active_recall'),
+      activeRecallQuestions,
+      activeRecallRatings,
       flashcardsReviewed,
       reviewSessions: countReviewSessions(topicActivities, reviews, reviewStart),
-      reviewRatings: sumRatings('review'),
+      reviewRatings,
       methodCoverage,
+      studyDays,
       practiceProgress,
+      daysSinceStudy,
+      fadedPoints: mastery ? mastery.earnedScore - mastery.score : 0,
       lastStudiedAt: lastActivityAt,
     };
   });

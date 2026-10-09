@@ -1,6 +1,6 @@
 {
   "expo": {
-    "name": "MedExam",
+    "name": "Medora",
     "slug": "MedExam",
     "version": "1.0.0",
     "orientation": "portrait",
@@ -28,23 +28,24 @@
       [
         "expo-splash-screen",
         {
-          "backgroundColor": "#F5FAFC"
+          "backgroundColor": "#E9F2FC"
         }
       ],
       [
         "expo-notifications",
         {
           "defaultChannel": "study-reminders",
-          "color": "#0F7181"
+          "color": "#2A78D6"
         }
       ],
       [
         "expo-image-picker",
         {
-          "photosPermission": "MedExam uses your selected photo as your profile picture.",
+          "photosPermission": "Medora uses your selected photo as your profile picture.",
           "microphonePermission": false
         }
-      ]
+      ],
+      "expo-secure-store"
     ],
     "experiments": {
       "typedRoutes": true,

@@ -1,5 +1,5 @@
 import { Alert } from 'react-native';
-import { SettingsCard, SettingsChoice, SettingsNote, SettingsPage } from './shared';
+import { SettingsCard, SettingsChoice, SettingsNote, SettingsPage } from '@/components/settings-shared';
 import { useAppSettings } from '../../services/app-settings-context';
 import { tr } from '../../services/localization';
 
