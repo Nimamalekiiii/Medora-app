@@ -7,6 +7,7 @@ import { useAuth } from '@/services/auth-context';
 import { getSupabaseAuthClient } from '@/services/cloud-sync';
 import { forgetLastAccount, getLastAccount, type LastAccount } from '@/services/last-account';
 import { tr } from '@/services/localization';
+import { router } from 'expo-router';
 import { useEffect, useRef, useState } from 'react';
 import Animated, { FadeInDown, useReducedMotion } from 'react-native-reanimated';
 import {
@@ -554,6 +555,17 @@ export default function WelcomeScreen() {
                   {busy ? <ActivityIndicator color="#FFFFFF" /> : <Text style={styles.primaryButtonText}>{mode === 'sign-up' ? 'Create account' : 'Log in'}</Text>}
                 </Pressable>
 
+                {mode === 'sign-up' ? (
+                  <View style={styles.legalRow}>
+                    <Text style={styles.staySignedIn}>By creating an account you accept the</Text>
+                    <View style={styles.legalLinks}>
+                      <Pressable accessibilityRole="link" onPress={() => router.push({ pathname: '/legal', params: { page: 'terms' } })} hitSlop={8}><Text style={styles.legalLink}>Terms of use</Text></Pressable>
+                      <Pressable accessibilityRole="link" onPress={() => router.push({ pathname: '/legal', params: { page: 'privacy' } })} hitSlop={8}><Text style={styles.legalLink}>Privacy</Text></Pressable>
+                      <Pressable accessibilityRole="link" onPress={() => router.push({ pathname: '/legal', params: { page: 'health' } })} hitSlop={8}><Text style={styles.legalLink}>Health disclaimer</Text></Pressable>
+                    </View>
+                  </View>
+                ) : null}
+
                 <Text style={styles.staySignedIn}>You stay signed in on this device until you choose to sign out.</Text>
 
                 {returning ? (
@@ -654,6 +666,9 @@ const styles = StyleSheet.create({
   noticeText: { color: appColor('#276B57', 'text'), fontSize: 13, lineHeight: 19 },
 
   staySignedIn: { marginTop: 12, color: appColor('#83939C', 'text'), fontSize: 12, lineHeight: 17, textAlign: 'center' },
+  legalRow: { alignItems: 'center', gap: 4, marginTop: 4 },
+  legalLinks: { flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'center', columnGap: 16, rowGap: 4 },
+  legalLink: { color: appColor('#0F7181', 'text'), fontSize: 13, fontWeight: '700', textDecorationLine: 'underline' },
   switchMode: { minHeight: 46, justifyContent: 'center', alignItems: 'center', marginTop: 2 },
   switchModeText: { color: appColor('#0F7181', 'text'), fontSize: 13, fontWeight: '700', textAlign: 'center' },
   footer: { marginTop: 'auto', paddingTop: 26, color: appColor('#A0ADB4', 'text'), fontSize: 12, lineHeight: 17, textAlign: 'center' },

@@ -57,12 +57,17 @@ export default function PrivacySettings() {
   return <>
     <SettingsPage title="Privacy & data" description="Understand what is stored and decide what to keep or remove.">
       <SettingsCard title="AI and privacy"><Text style={styles.copy}>{tr('AI study materials use the subject, topic and any notes you add only when you ask for questions or flashcards. A PDF you choose to import is sent to AI to be turned into notes. When you tap Review my progress, Medora sends calculated summaries of subject and topic activity, quiz and practice results, flashcard reviews, study-day trends, upcoming exam details, saved plans and study preferences so AI can suggest a next step. It does not send your study notes or account email for this progress review. Automatic study-plan recommendations have a separate setting. Do not include patient-identifiable or other sensitive information; check generated medical content against trusted course sources.', preferences.language)}</Text></SettingsCard>
+      <SettingsCard title="Read more">
+        <SettingsRow icon="shieldLock" title="Privacy" description="What we store, how we use it and your rights" onPress={() => router.push({ pathname: '/legal', params: { page: 'privacy' } })} />
+        <SettingsRow icon="heartPulse" title="Health disclaimer" description="Medora is a study tool, not medical advice" onPress={() => router.push({ pathname: '/legal', params: { page: 'health' } })} />
+        <SettingsRow icon="note" title="Terms of use" onPress={() => router.push({ pathname: '/legal', params: { page: 'terms' } })} />
+      </SettingsCard>
       <SettingsCard title="Your data">
         <SettingsRow title="Open Data & account" description="Export, restore, cloud sync, and account details" onPress={() => router.push('/settings/data')} />
         <SettingsRow title="Delete study data" description="Keep your account, remove study content from this device and synced copy" onPress={clearStudyData} destructive />
         <SettingsRow title="Delete account" description="Permanently remove your Medora sign-in and cloud account" onPress={() => { setConfirmation(''); setDeleteAccountOpen(true); }} destructive />
       </SettingsCard>
-      <SettingsNote>Your profile picture is private to your account when the profile image storage migration has been applied. Backup and sync status is available under Data & account.</SettingsNote>
+      <SettingsNote>Your profile picture is private to your account. Backup and sync status is available under Data & account.</SettingsNote>
       {busy ? <ActivityIndicator color={appColor('#327E9D', 'text')} /> : null}
     </SettingsPage>
     <Modal visible={deleteAccountOpen} transparent animationType="fade" onRequestClose={() => setDeleteAccountOpen(false)}>

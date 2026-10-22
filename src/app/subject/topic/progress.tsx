@@ -1,315 +1,279 @@
-import { cardShadow } from '@/components/gloss';
-import { BackLink } from '@/components/back-link';
-import { LocalizedText as Text } from '@/components/localized-text';
+import { ProgressBar } from '@/components/charts';
+import { ink, p, useProgressPalette } from '@/components/progress/theme';
 import PullToRefreshScrollView from '@/components/pull-to-refresh-scroll-view';
+import { IconChip, iconTint } from '@/components/study/icon-chip';
+import { ScreenBar, SectionHeader, studyStyles } from '@/components/study/study-ui';
 import { StudyIcon, type StudyIconName } from '@/components/study-icon';
 import { appColor } from '@/constants/adaptive-color';
-import { useDayRefresh } from '@/hooks/use-day-refresh';
+import { ui } from '@/constants/ui';
+import { useStudyData } from '@/hooks/use-study-data';
 import { getAITopicInsight, type AITopicInsight } from '@/services/ai-api';
-import { subscribeToLocalDataChanges } from '@/services/cloud-sync-state';
-import { buildProgressDashboard, type DashboardTopic } from '@/services/progress-dashboard';
-import { getDueFlashcards } from '@/services/study-engine';
-import {
-  getActiveRecallQuestionsForTopic, getAppPreferences, getExamsBySubject, getFlashcardReviews,
-  getFlashcards, getQuizResults, getStudyActivity, getStudyPreferences, getSubjects, getTopicsBySubject,
-} from '@/services/storage';
-import type { ActiveRecallQuestion, Exam, Flashcard, FlashcardReview, QuizResult, StudyActivity, Subject, TopicsBySubject } from '@/types/study';
-import { Stack, router, useFocusEffect, useLocalSearchParams } from 'expo-router';
-import { useCallback, useMemo, useRef, useState } from 'react';
-import { ActivityIndicator, AppState, Pressable, StyleSheet, View } from 'react-native';
+import { useAppSettings } from '@/services/app-settings-context';
+import { getDaysUntil } from '@/services/dates';
+import { formatStudyTime } from '@/services/progress-metrics';
+import { calculateTopicMastery, MASTERED_AT } from '@/services/topic-mastery';
+import type { StudyActivity } from '@/types/study';
+import { Stack, router, useLocalSearchParams, type Href } from 'expo-router';
+import { useEffect, useRef, useState } from 'react';
+import { ActivityIndicator, Pressable, StyleSheet, Text, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
-type TopicData = {
-  subjects: Subject[];
-  topics: TopicsBySubject;
-  exams: Record<string, Exam | null>;
-  cards: Flashcard[];
-  activities: StudyActivity[];
-  quizResults: QuizResult[];
-  reviews: FlashcardReview[];
-  questions: ActiveRecallQuestion[];
-  studyPreferences: Awaited<ReturnType<typeof getStudyPreferences>>;
-  language: 'en' | 'no';
-};
+const param = (value: string | string[] | undefined) => (Array.isArray(value) ? value[0] ?? '' : value ?? '');
+const ACTIVITY_ICON: Record<StudyActivity['activity'], StudyIconName> = { quiz: 'quiz', active_recall: 'brain', flashcards: 'cards', review: 'review', focus: 'timer' };
 
-const DEFAULT_PREFERENCES: TopicData['studyPreferences'] = {
-  dailyGoalMinutes: 45, preferredMethods: ['active_recall', 'quiz', 'flashcards', 'review'],
-  studyDays: [1, 2, 3, 4, 5], preferredStudyTime: 'evening', sessionLengthMinutes: 25,
-  breakDurationMinutes: 5, autoGeneratePlan: true, includeWeekends: false, prioritizeWeakTopics: true,
-  prioritizeUpcomingExams: true, includeReviewSessions: true, includeFlashcards: true, includeQuizzes: true,
-};
-const EMPTY_DATA: TopicData = { subjects: [], topics: {}, exams: {}, cards: [], activities: [], quizResults: [], reviews: [], questions: [], studyPreferences: DEFAULT_PREFERENCES, language: 'en' };
-
-function relativeDate(value: string | null) {
-  if (!value) return 'Not studied yet';
-  const date = new Date(value);
-  if (!Number.isFinite(date.getTime())) return 'Not available';
-  const today = new Date();
-  const localToday = new Date(today.getFullYear(), today.getMonth(), today.getDate()).getTime();
-  const localDate = new Date(date.getFullYear(), date.getMonth(), date.getDate()).getTime();
-  const days = Math.round((localToday - localDate) / 86_400_000);
-  if (days === 0) return 'Today';
-  if (days === 1) return 'Yesterday';
-  return date.toLocaleDateString(undefined, { day: 'numeric', month: 'short' });
-}
-
-function activityPresentation(activity: StudyActivity): { label: string; icon: StudyIconName } {
-  if (activity.activity === 'active_recall') return { label: 'Active Recall', icon: 'brain' };
-  if (activity.activity === 'quiz') return { label: 'Quiz', icon: 'quiz' };
-  if (activity.activity === 'focus') return { label: 'Focus session', icon: 'focus' };
-  if (activity.activity === 'review') return { label: 'Flashcard review', icon: 'review' };
-  return { label: 'Flashcards', icon: 'cards' };
-}
-
+/** A topic's detailed progress: what it is built from, results, questions to revisit, history, and an AI review. */
 export default function TopicProgressScreen() {
-  const params = useLocalSearchParams();
-  const topicId = Array.isArray(params.id) ? params.id[0] : String(params.id ?? '');
-  const fallbackName = Array.isArray(params.name) ? params.name[0] : String(params.name ?? 'Topic');
-  const fallbackSubjectId = Array.isArray(params.subjectId) ? params.subjectId[0] : String(params.subjectId ?? '');
-  const todayKey = useDayRefresh();
-  const [data, setData] = useState<TopicData>(EMPTY_DATA);
-  const [loading, setLoading] = useState(true);
+  const params = useLocalSearchParams<{ id?: string | string[]; name?: string | string[]; subjectId?: string | string[] }>();
+  const topicId = param(params.id);
+  const { preferences } = useAppSettings();
+  const language = preferences.language;
+  const L = (en: string, no: string) => (language === 'no' ? no : en);
+  const locale = language === 'no' ? 'nb-NO' : 'en-GB';
+  const palette = useProgressPalette();
+  const { loading, data, metrics, todayKey, reload } = useStudyData();
+
+  const [insight, setInsight] = useState<AITopicInsight | null>(null);
   const [aiLoading, setAILoading] = useState(false);
-  const [aiError, setAIError] = useState<string | null>(null);
-  const [aiInsight, setAIInsight] = useState<AITopicInsight | null>(null);
-  const aiRevision = useRef(0);
+  const [aiError, setAIError] = useState('');
+  const request = useRef(0);
 
-  const loadData = useCallback(async (invalidateAI = false) => {
-    if (invalidateAI) {
-      aiRevision.current += 1;
-      setAIInsight(null);
-      setAIError(null);
+  // A review belongs to the numbers it was made from, so it is cleared when they change.
+  const activityCount = data?.activities.length ?? 0;
+  useEffect(() => {
+    request.current += 1;
+    setInsight(null);
+    setAIError('');
+    setAILoading(false);
+  }, [activityCount, topicId, language]);
+
+  const topic = metrics?.topics.find((item) => String(item.id) === topicId);
+  const topicName = topic?.name ?? (param(params.name) || L('Topic', 'Tema'));
+  const subjectId = topic?.subjectId ?? param(params.subjectId);
+  const routeParams = { id: topicId, name: topicName, subjectId };
+  const open = (pathname: string) => () => router.push({ pathname, params: routeParams } as Href);
+
+  let body;
+  if (!data || !metrics) {
+    body = <View style={styles.state}>{loading ? <ActivityIndicator color={palette.accent} /> : <Text style={p.body}>{L('This topic could not be loaded. Pull down to try again.', 'Temaet kunne ikke lastes inn. Dra ned for å prøve igjen.')}</Text>}</View>;
+  } else if (!topic) {
+    body = <View style={[p.card, p.empty]}><Text style={p.emptyTitle}>{L('This topic no longer exists', 'Dette temaet finnes ikke lenger')}</Text></View>;
+  } else {
+    const mastery = calculateTopicMastery({ ...topic, daysSinceLastStudy: topic.daysSinceStudy });
+    const activities = data.activities.filter((item) => String(item.topicId) === topicId)
+      .sort((a, b) => new Date(b.completedAt).getTime() - new Date(a.completedAt).getTime());
+    const studyMinutes = Math.round(activities.reduce((sum, item) => sum + Math.max(0, item.durationSeconds || 0), 0) / 60);
+    const cards = data.cards.filter((card) => String(card.topicId) === topicId);
+    const now = Date.now();
+    const dueCards = cards.filter((card) => !card.nextReviewAt || !(new Date(card.nextReviewAt).getTime() > now)).length;
+    const questions = data.recallQuestions[topicId] ?? [];
+    const again = questions.reduce((sum, item) => sum + (item.againCount ?? 0), 0);
+    const hard = questions.reduce((sum, item) => sum + (item.hardCount ?? 0), 0);
+    const troubled = [...questions]
+      .filter((item) => (item.againCount ?? 0) + (item.hardCount ?? 0) > 0)
+      .sort((a, b) => (b.againCount ?? 0) + (b.hardCount ?? 0) - ((a.againCount ?? 0) + (a.hardCount ?? 0)))
+      .slice(0, 4);
+    const missed = data.quizResults.filter((result) => String(result.topicId) === topicId)
+      .sort((a, b) => new Date(b.completedAt).getTime() - new Date(a.completedAt).getTime())
+      .flatMap((result) => result.missedQuestions ?? [])
+      .slice(0, 4);
+    const exam = data.exams[subjectId];
+    const inExam = Boolean(exam?.topicIds?.map(String).includes(topicId));
+    const examDays = exam && inExam ? getDaysUntil(exam.date, todayKey) : -1;
+    const study = data.preferences;
+    const methods = study.preferredMethods.filter((method) =>
+      (method !== 'review' || study.includeReviewSessions) && (method !== 'flashcards' || study.includeFlashcards) && (method !== 'quiz' || study.includeQuizzes));
+
+    const parts = [
+      { key: 'quiz', icon: 'quiz' as const, label: 'Quiz', value: mastery.parts.quiz, detail: topic.quizQuestions ? L(`${topic.quizCorrect} of ${topic.quizQuestions} correct`, `${topic.quizCorrect} av ${topic.quizQuestions} riktig`) : L('No quiz answers yet', 'Ingen quizsvar ennå') },
+      { key: 'recall', icon: 'brain' as const, label: 'Active Recall', value: mastery.parts.recall, detail: L(`${topic.activeRecallQuestions} answered · ${again + hard} hard`, `${topic.activeRecallQuestions} besvart · ${again + hard} vanskelige`) },
+      { key: 'cards', icon: 'cards' as const, label: 'Flashcards', value: mastery.parts.cards, detail: L(`${topic.flashcardsReviewed} reviewed · ${dueCards} due`, `${topic.flashcardsReviewed} repetert · ${dueCards} forfalt`) },
+      { key: 'days', icon: 'calendar' as const, label: L('Study days', 'Studiedager'), value: mastery.parts.days, detail: L(`${topic.studyDays} days · ${formatStudyTime(studyMinutes, language)}`, `${topic.studyDays} dager · ${formatStudyTime(studyMinutes, language)}`) },
+    ];
+
+    async function analyze() {
+      if (!topic || aiLoading) return;
+      const id = ++request.current;
+      setAILoading(true);
+      setAIError('');
+      try {
+        const result = await getAITopicInsight({
+          language,
+          topic: { id: topicId, name: topicName, subjectName: topic.subjectName },
+          metrics: {
+            practiceProgress: topic.practiceProgress,
+            quizAccuracy: topic.quizAccuracy,
+            quizQuestions: topic.quizQuestions,
+            quizCorrect: topic.quizCorrect,
+            activeRecallQuestions: topic.activeRecallQuestions,
+            activeRecallAgain: again,
+            activeRecallHard: hard,
+            flashcardsTotal: cards.length,
+            flashcardsReviewed: topic.flashcardsReviewed,
+            flashcardsDue: dueCards,
+            studySessions: activities.length,
+            studyMinutes,
+            lastStudiedAt: topic.lastStudiedAt,
+            daysUntilExam: examDays >= 0 ? examDays : null,
+            troubledQuestions: [
+              ...troubled.map((item) => item.question.slice(0, 300)),
+              ...missed.map((item) => `Recent quiz miss: ${item.question.slice(0, 260)}`),
+            ].slice(0, 10),
+          },
+          preferredMethods: methods,
+        });
+        if (id === request.current) setInsight(result);
+      } catch (error) {
+        if (id === request.current) setAIError(error instanceof Error ? error.message : L('The review could not be made. Try again.', 'Vurderingen kunne ikke lages. Prøv igjen.'));
+      } finally {
+        if (id === request.current) setAILoading(false);
+      }
     }
-    try {
-      const [subjects, topics, exams, cards, activities, quizResults, reviews, questions, studyPreferences, appPreferences] = await Promise.all([
-        getSubjects(), getTopicsBySubject(), getExamsBySubject(), getFlashcards(), getStudyActivity(), getQuizResults(), getFlashcardReviews(),
-        getActiveRecallQuestionsForTopic(topicId), getStudyPreferences(), getAppPreferences(),
-      ]);
-      setData({ subjects, topics, exams, cards, activities, quizResults, reviews, questions, studyPreferences, language: appPreferences.language });
-    } catch (error) {
-      console.warn('Could not load topic progress:', error);
-    } finally {
-      setLoading(false);
+
+    function describe(activity: StudyActivity) {
+      const count = Math.max(0, activity.questionCount || 0);
+      switch (activity.activity) {
+        case 'quiz': return { title: 'Quiz', detail: count ? `${activity.correctCount ?? 0}/${count} ${L('correct', 'riktig')}` : '' };
+        case 'active_recall': return { title: 'Active Recall', detail: `${count} ${L('questions', 'spørsmål')}` };
+        case 'review': return { title: L('Flashcard review', 'Repetisjon'), detail: `${count} ${L('cards', 'kort')}` };
+        case 'flashcards': return { title: 'Flashcards', detail: `${count} ${L('cards', 'kort')}` };
+        default: return { title: L('Focus session', 'Fokusøkt'), detail: formatStudyTime(Math.round((activity.durationSeconds || 0) / 60), language) };
+      }
     }
-  }, [topicId]);
 
-  useFocusEffect(useCallback(() => {
-    setLoading(true);
-    void loadData(false);
-    const unsubscribe = subscribeToLocalDataChanges(() => { void loadData(true); });
-    const appState = AppState.addEventListener('change', (state) => { if (state === 'active') void loadData(false); });
-    return () => { unsubscribe(); appState.remove(); };
-  }, [loadData]));
+    body = (
+      <>
+        <View>
+          <Text style={styles.title} accessibilityRole="header" numberOfLines={2}>{topicName}</Text>
+          <Text style={styles.subtitle} numberOfLines={1}>{[topic.subjectName, inExam && examDays >= 0 ? (examDays === 0 ? L('Exam today', 'Eksamen i dag') : L(`Exam in ${examDays} days`, `Eksamen om ${examDays} dager`)) : ''].filter(Boolean).join(' · ')}</Text>
+        </View>
 
-  const dashboard = useMemo(() => buildProgressDashboard({
-    subjects: data.subjects, topicsBySubject: data.topics, examsBySubject: data.exams,
-    activities: data.activities, quizResults: data.quizResults, flashcardReviews: data.reviews,
-  }, undefined, data.language), [data]);
-  const topicStats: DashboardTopic | undefined = dashboard.topics.find((topic) => String(topic.id) === topicId);
-  const subject = data.subjects.find((item) => String(item.id) === (topicStats?.subjectId ?? fallbackSubjectId));
-  const topic = (data.topics[String(subject?.id ?? fallbackSubjectId)] ?? []).find((item) => String(item.id) === topicId);
-  const topicName = topic?.name ?? fallbackName;
-  const topicCards = useMemo(() => data.cards.filter((card) => String(card.topicId) === topicId), [data.cards, topicId]);
-  const dueCards = useMemo(() => getDueFlashcards(topicCards), [topicCards, todayKey]);
-  const activity = dashboard.activities.filter((item) => String(item.topicId) === topicId).sort((a, b) => new Date(b.completedAt).getTime() - new Date(a.completedAt).getTime());
-  const latestStudy = topicStats?.lastStudiedAt ?? null;
-  const activeRecallAgain = Math.max(topicStats?.activeRecallRatings.again ?? 0, data.questions.reduce((sum, question) => sum + (question.againCount ?? 0), 0));
-  const activeRecallHard = Math.max(topicStats?.activeRecallRatings.hard ?? 0, data.questions.reduce((sum, question) => sum + (question.hardCount ?? 0), 0));
-  const troubledQuestions = [...data.questions]
-    .filter((question) => (question.againCount ?? 0) + (question.hardCount ?? 0) > 0)
-    .sort((a, b) => (b.againCount ?? 0) + (b.hardCount ?? 0) - ((a.againCount ?? 0) + (a.hardCount ?? 0)))
-    .slice(0, 5);
-  const missedQuizQuestions = data.quizResults
-    .filter((result) => String(result.topicId) === topicId)
-    .sort((a, b) => new Date(b.completedAt).getTime() - new Date(a.completedAt).getTime())
-    .flatMap((result) => result.missedQuestions ?? [])
-    .slice(0, 5);
-  const topicExam = subject ? data.exams[String(subject.id)] : null;
-  const isExamTopic = Boolean(topicExam?.topicIds?.map(String).includes(topicId));
-  const daysUntilExam = topicExam && isExamTopic
-    ? Math.round((new Date(`${topicExam.date}T00:00:00`).getTime() - new Date(`${todayKey}T00:00:00`).getTime()) / 86_400_000)
-    : null;
-  const activityCount = activity.length;
-  const studyMinutes = Math.round(activity.reduce((sum, item) => sum + Math.max(0, item.durationSeconds || 0), 0) / 60);
-  const answered = (topicStats?.quizQuestions ?? 0) + (topicStats?.activeRecallQuestions ?? 0);
-  const correct = (topicStats?.quizCorrect ?? 0) + (topicStats?.activeRecallRatings.good ?? 0) + (topicStats?.activeRecallRatings.easy ?? 0);
-  const incorrect = Math.max(0, (topicStats?.quizQuestions ?? 0) - (topicStats?.quizCorrect ?? 0) + activeRecallAgain + activeRecallHard);
-  const methods = data.studyPreferences.preferredMethods.filter((method) =>
-    (method !== 'review' || data.studyPreferences.includeReviewSessions) &&
-    (method !== 'flashcards' || data.studyPreferences.includeFlashcards) &&
-    (method !== 'quiz' || data.studyPreferences.includeQuizzes));
+        <View style={p.card}>
+          <View style={p.cardHeader}>
+            <Text style={p.cardTitle}>{L('Topic progress', 'Fremgang i temaet')}</Text>
+            <Text style={styles.percent}>{topic.practiceProgress}%</Text>
+          </View>
+          <ProgressBar value={topic.practiceProgress} color={palette.accent} trackColor={palette.track} height={9} />
+          {topic.fadedPoints > 0 ? <Text style={styles.fading}>{L(`Down ${topic.fadedPoints} points: not studied for ${topic.daysSinceStudy} days.`, `Ned ${topic.fadedPoints} poeng: ikke studert på ${topic.daysSinceStudy} dager.`)}</Text> : null}
+          <Text style={p.small}>{L(`Grows with how much you practise and how well it goes. The topic is completed at ${MASTERED_AT}%. This is a practice measure, not an exam prediction.`, `Vokser med hvor mye du øver og hvor godt det går. Temaet er fullført ved ${MASTERED_AT} %. Dette er et mål på øving, ikke en spådom om eksamen.`)}</Text>
+        </View>
 
-  async function analyzeTopic() {
-    if (!topicStats || !subject) return;
-    const revisionAtStart = aiRevision.current;
-    setAILoading(true);
-    setAIError(null);
-    try {
-      const insight = await getAITopicInsight({
-        language: data.language,
-        topic: { id: topicId, name: topicName, subjectName: subject.name },
-        metrics: {
-          practiceProgress: topicStats.practiceProgress,
-          quizAccuracy: topicStats.quizAccuracy,
-          quizQuestions: topicStats.quizQuestions,
-          quizCorrect: topicStats.quizCorrect,
-          activeRecallQuestions: topicStats.activeRecallQuestions,
-          activeRecallAgain,
-          activeRecallHard,
-          flashcardsTotal: topicCards.length,
-          flashcardsReviewed: topicStats.flashcardsReviewed,
-          flashcardsDue: dueCards.length,
-          studySessions: activityCount,
-          studyMinutes,
-          lastStudiedAt: latestStudy,
-          daysUntilExam: daysUntilExam !== null && daysUntilExam >= 0 ? daysUntilExam : null,
-          troubledQuestions: [
-            ...troubledQuestions.map((question) => question.question.slice(0, 300)),
-            ...missedQuizQuestions.map((question) => `Recent quiz miss: ${question.question.slice(0, 260)}`),
-          ].slice(0, 10),
-        },
-        preferredMethods: methods,
-      });
-      if (revisionAtStart === aiRevision.current) setAIInsight(insight);
-    } catch (error) {
-      if (revisionAtStart === aiRevision.current) setAIError(error instanceof Error ? error.message : 'Could not analyze this topic. Try again.');
-    } finally {
-      setAILoading(false);
-    }
-  }
+        <SectionHeader title={L('What builds your progress', 'Hva som bygger fremgangen')} />
+        <View style={[p.card, styles.list]}>
+          {parts.map((part, index) => (
+            <View key={part.key} style={[styles.part, index > 0 && styles.divider]}>
+              <IconChip name={part.icon} size={18} />
+              <View style={p.grow}>
+                <View style={styles.partTop}>
+                  <Text style={[styles.rowTitle, p.grow]}>{part.label}</Text>
+                  <Text style={styles.partValue}>{part.value}%</Text>
+                </View>
+                <View style={styles.partBar}><ProgressBar value={part.value} color={iconTint(part.icon, palette)} trackColor={palette.track} height={6} /></View>
+                <Text style={p.small}>{part.detail}</Text>
+              </View>
+            </View>
+          ))}
+        </View>
 
-  function metric(icon: StudyIconName, label: string, value: string, detail: string) {
-    return <View key={label} style={styles.metricCard}><View style={styles.metricIcon}><StudyIcon name={icon} size={17} /></View><Text style={styles.metricLabel}>{label}</Text><Text style={styles.metricValue}>{value}</Text><Text style={styles.metricDetail}>{detail}</Text></View>;
+        <View style={p.card}>
+          <View style={p.row}>
+            <IconChip name="sparkles" />
+            <View style={p.grow}>
+              <Text style={styles.rowTitle}>{L('AI review of this topic', 'AI-vurdering av temaet')}</Text>
+              <Text style={p.small}>{L('Based only on your saved results, ratings and exam date.', 'Bygger bare på resultatene, vurderingene og eksamensdatoen du har lagret.')}</Text>
+            </View>
+          </View>
+          {insight ? (
+            <View style={[p.inset, styles.insight]}>
+              <Text style={p.body}>{insight.overview}</Text>
+              <Text style={styles.eyebrow}>{L('Suggested next step', 'Foreslått neste steg')}</Text>
+              <Text style={styles.nextStep}>{insight.nextStep}</Text>
+            </View>
+          ) : null}
+          {aiError ? <Text style={ui.formError}>{aiError}</Text> : null}
+          <Pressable accessibilityRole="button" disabled={aiLoading} onPress={() => { void analyze(); }} style={({ pressed }) => [p.button, styles.buttonRow, { backgroundColor: palette.accent }, (pressed || aiLoading) && p.pressed]}>
+            {aiLoading ? <ActivityIndicator color="#FFFFFF" /> : <StudyIcon name="sparkles" size={15} color="#FFFFFF" />}
+            <Text style={p.buttonText}>{aiLoading ? L('Reviewing…', 'Vurderer …') : insight ? L('Review again', 'Vurder på nytt') : L('Review this topic', 'Vurder temaet')}</Text>
+          </Pressable>
+        </View>
+
+        {troubled.length || missed.length ? (
+          <>
+            <SectionHeader title={L('Questions to revisit', 'Spørsmål å ta igjen')} action={L('Practise', 'Øv')} onAction={open('/subject/topic/study/active-recall')} />
+            <View style={[p.card, styles.list]}>
+              {troubled.map((item, index) => (
+                <View key={`r-${item.id}`} style={[styles.question, index > 0 && styles.divider]}>
+                  <Text style={styles.questionText}>{item.question}</Text>
+                  <Text style={p.small}>Active Recall · {L('Again', 'Igjen')} {item.againCount ?? 0} · {L('Hard', 'Vanskelig')} {item.hardCount ?? 0}</Text>
+                </View>
+              ))}
+              {missed.map((item, index) => (
+                <View key={`q-${index}-${item.question}`} style={[styles.question, (troubled.length > 0 || index > 0) && styles.divider]}>
+                  <Text style={styles.questionText}>{item.question}</Text>
+                  <Text style={p.small}>Quiz · {L('Correct answer:', 'Riktig svar:')} {item.correctAnswer}</Text>
+                </View>
+              ))}
+            </View>
+          </>
+        ) : null}
+
+        <SectionHeader title={L('History', 'Historikk')} />
+        {activities.length === 0 ? (
+          <View style={[p.card, p.empty]}><Text style={[p.body, studyStyles.centered]}>{L('Your sessions on this topic will show here.', 'Øktene dine i dette temaet vises her.')}</Text></View>
+        ) : (
+          <View style={[p.card, styles.list]}>
+            {activities.slice(0, 8).map((activity, index) => {
+              const text = describe(activity);
+              const icon = ACTIVITY_ICON[activity.activity] ?? 'book';
+              return (
+                <View key={`${activity.id}-${activity.completedAt}`} style={[styles.history, index > 0 && styles.divider]}>
+                  <StudyIcon name={icon} size={19} color={iconTint(icon, palette)} />
+                  <View style={p.grow}>
+                    <Text style={styles.rowTitle}>{text.title}</Text>
+                    {text.detail ? <Text style={p.small}>{text.detail}</Text> : null}
+                  </View>
+                  <Text style={p.small}>{new Date(activity.completedAt).toLocaleDateString(locale, { day: 'numeric', month: 'short' })}</Text>
+                </View>
+              );
+            })}
+          </View>
+        )}
+
+        <Pressable accessibilityRole="button" onPress={open('/subject/topic/[id]')} style={({ pressed }) => [p.outlineButton, styles.buttonRow, pressed && p.pressed]}>
+          <StudyIcon name="play" size={14} color={palette.accent} /><Text style={p.outlineButtonText}>{L('Continue studying', 'Fortsett å studere')}</Text>
+        </Pressable>
+      </>
+    );
   }
 
   return (
-    <SafeAreaView style={styles.container} edges={['top']}>
+    <SafeAreaView style={ui.container} edges={['top']}>
       <Stack.Screen options={{ headerShown: false }} />
-      <PullToRefreshScrollView contentContainerStyle={styles.content} showsVerticalScrollIndicator={false} onRefresh={() => loadData(true)}>
-        <BackLink label={topicName} />
-        <Text style={styles.eyebrow}>TOPIC PROGRESS</Text>
-        <Text style={styles.title}>{topicName}</Text>
-        <Text style={styles.subtitle}>{subject?.name ?? 'Subject'} · Activity and practice saved for this topic.</Text>
-
-        {loading ? <View style={styles.loading}><ActivityIndicator color="#2A78D6" /><Text style={styles.bodyText}>Updating saved progress…</Text></View> : <>
-          {isExamTopic && topicExam && daysUntilExam !== null && daysUntilExam >= 0 ? <View style={styles.examCard}><View style={styles.examIcon}><StudyIcon name="calendar" size={18} /></View><View style={styles.grow}><Text style={styles.examTitle}>Part of the {subject?.name} exam</Text><Text style={styles.examText}>{daysUntilExam === 0 ? 'Exam today' : `${daysUntilExam} days remaining`} · {topicExam.type}</Text></View></View> : null}
-
-          <View style={styles.scoreCard}>
-            <View style={styles.scoreHeader}><View><Text style={styles.eyebrow}>RECORDED PRACTICE PROGRESS</Text><Text style={styles.scoreCaption}>Grows with how much you practise and how well it goes</Text></View><Text style={styles.scoreValue}>{topicStats?.practiceProgress ?? 0}%</Text></View>
-            <View style={styles.progressTrack}><View style={[styles.progressFill, { width: `${topicStats?.practiceProgress ?? 0}%` }]} /></View>
-            <Text style={styles.footnote}>This is a calculated practice indicator, not a claim of mastery or an exam prediction.</Text>
-          </View>
-
-          <View style={styles.metricsGrid}>
-            {metric('quiz', 'Quiz accuracy', topicStats?.quizAccuracy === null || topicStats?.quizAccuracy === undefined ? '—' : `${topicStats.quizAccuracy}%`, topicStats?.quizQuestions ? `${topicStats.quizCorrect} correct of ${topicStats.quizQuestions}` : 'No quiz answers saved')}
-            {metric('brain', 'Active Recall', String(topicStats?.activeRecallQuestions ?? 0), `Again ${activeRecallAgain} · Hard ${activeRecallHard}`)}
-            {metric('cards', 'Flashcards', String(topicStats?.flashcardsReviewed ?? 0), `${topicCards.length} saved · ${dueCards.length} due`)}
-            {metric('calendar', 'Study sessions', String(activityCount), `${studyMinutes} min · last ${relativeDate(latestStudy)}`)}
-          </View>
-
-          <View style={styles.responseCard}>
-            <View style={styles.sectionHeading}><View style={styles.sectionIcon}><StudyIcon name="chart" size={19} /></View><View><Text style={styles.sectionTitle}>Question results</Text><Text style={styles.sectionSub}>From saved quizzes and rated recall sessions</Text></View></View>
-            <View style={styles.resultRow}><View style={styles.resultTile}><Text style={styles.resultValue}>{answered}</Text><Text style={styles.resultLabel}>Answered</Text></View><View style={styles.resultTile}><Text style={styles.resultValue}>{correct}</Text><Text style={styles.resultLabel}>Remembered well</Text></View><View style={styles.resultTile}><Text style={styles.resultValue}>{incorrect}</Text><Text style={styles.resultLabel}>Needs practice</Text></View></View>
-            <Text style={styles.footnote}>Active Recall answers are self-rated. Correct and needs-practice totals combine quiz answers with Good/Easy or Again/Hard ratings.</Text>
-          </View>
-
-          {troubledQuestions.length || missedQuizQuestions.length ? <View style={styles.responseCard}>
-            <View style={styles.sectionHeading}><View style={styles.sectionIcon}><StudyIcon name="target" size={18} /></View><View><Text style={styles.sectionTitle}>Questions to revisit</Text><Text style={styles.sectionSub}>Saved ratings show where more practice may help</Text></View></View>
-            {troubledQuestions.map((question) => <View key={question.id} style={styles.troubledRow}><Text style={styles.troubledText}>{question.question}</Text><Text style={styles.troubledCount}>Again {question.againCount ?? 0} · Hard {question.hardCount ?? 0}</Text></View>)}
-            {missedQuizQuestions.map((question, index) => <View key={`quiz-miss-${index}-${question.question}`} style={styles.troubledRow}><Text style={styles.troubledText}>{question.question}</Text><Text style={styles.troubledCount}>Missed in a saved quiz · correct answer: {question.correctAnswer}</Text></View>)}
-            <Pressable style={styles.secondaryButton} onPress={() => router.push({ pathname: '/subject/topic/study/active-recall', params: { id: topicId, name: topicName, subjectId: String(subject?.id ?? fallbackSubjectId) } })}><StudyIcon name="brain" size={17} /><Text style={styles.secondaryButtonText}>Practise with Active Recall</Text></Pressable>
-          </View> : null}
-
-          <View style={styles.aiCard}>
-            <View style={styles.sectionHeading}><View style={styles.aiIcon}><StudyIcon name="sparkles" size={19} /></View><View style={styles.grow}><Text style={styles.sectionTitle}>Medora analysis</Text><Text style={styles.sectionSub}>AI reads only the metrics and rated questions saved for this topic.</Text></View></View>
-            {aiInsight ? <View style={styles.aiInsight}><Text style={styles.aiOverview}>{aiInsight.overview}</Text><Text style={styles.nextStepLabel}>SUGGESTED NEXT STEP</Text><Text style={styles.aiNextStep}>{aiInsight.nextStep}</Text></View> : null}
-            {aiError ? <View style={styles.errorBox}><Text style={styles.errorText}>{aiError}</Text><Pressable onPress={() => { void analyzeTopic(); }}><Text style={styles.retryText}>Try again</Text></Pressable></View> : null}
-            {!aiInsight ? <Text style={styles.footnote}>The analysis is based on saved activity, your self-ratings, due cards, exam timing and enabled study methods. It will not invent quiz answers.</Text> : null}
-            <Pressable accessibilityRole="button" disabled={aiLoading || !topicStats || !subject} style={({ pressed }) => [styles.aiButton, pressed && styles.pressed, (aiLoading || !topicStats || !subject) && styles.disabled]} onPress={() => { void analyzeTopic(); }}>
-              {aiLoading ? <ActivityIndicator color="#FFFFFF" /> : <StudyIcon name="sparkles" size={17} color="#FFFFFF" />}
-              <Text style={styles.aiButtonText}>{aiLoading ? 'Analyzing saved progress…' : aiInsight ? 'Refresh analysis' : 'Analyze this topic'}</Text>
-            </Pressable>
-          </View>
-
-          <View style={styles.historyCard}>
-            <View style={styles.sectionHeading}><View style={styles.sectionIcon}><StudyIcon name="clock" size={18} /></View><View><Text style={styles.sectionTitle}>Recent activity</Text><Text style={styles.sectionSub}>Saved study sessions for {topicName}</Text></View></View>
-            {activity.length ? activity.slice(0, 7).map((item) => {
-              const presentation = activityPresentation(item);
-              const date = new Date(item.completedAt);
-              const detail = item.activity === 'quiz' ? `${item.correctCount ?? 0}/${item.questionCount} correct` : `${item.questionCount} ${item.activity === 'active_recall' ? 'questions' : 'cards'} · ${Math.round(item.durationSeconds / 60)} min`;
-              return <View key={`${item.id}-${item.completedAt}`} style={styles.historyRow}><View style={styles.historyIcon}><StudyIcon name={presentation.icon} size={16} /></View><View style={styles.grow}><Text style={styles.historyTitle}>{presentation.label}</Text><Text style={styles.historyDetail}>{detail}</Text></View><Text style={styles.historyDate}>{date.toLocaleDateString(undefined, { day: 'numeric', month: 'short' })}</Text></View>;
-            }) : <View style={styles.emptyHistory}><Text style={styles.sectionSub}>No study activity is saved for this topic yet.</Text></View>}
-          </View>
-
-          <Pressable style={styles.primaryButton} onPress={() => router.push({ pathname: '/subject/topic/[id]', params: { id: topicId, name: topicName, subjectId: String(subject?.id ?? fallbackSubjectId) } })}><StudyIcon name="brain" size={18} color="#FFFFFF" /><Text style={styles.primaryButtonText}>Continue studying</Text></Pressable>
-        </>}
+      <PullToRefreshScrollView contentContainerStyle={studyStyles.content} showsVerticalScrollIndicator={false} onRefresh={reload}>
+        <ScreenBar backLabel={L('Back', 'Tilbake')} />
+        {body}
       </PullToRefreshScrollView>
     </SafeAreaView>
   );
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: appColor('#F7FBFE', 'background'), paddingHorizontal: 20 },
-  content: { paddingTop: 7, paddingBottom: 38, gap: 13 },
-  backButton: { alignSelf: 'flex-start', paddingVertical: 5 },
-  backText: { color: appColor('#3B85A1', 'text'), fontSize: 14, fontWeight: '700' },
-  eyebrow: { color: appColor('#8296A2', 'text'), fontSize: 9, fontWeight: '800', letterSpacing: 0.85 },
-  title: { color: appColor('#17324D', 'text'), fontSize: 28, fontWeight: '800', marginTop: 2 },
-  subtitle: { color: appColor('#748895', 'text'), fontSize: 12, lineHeight: 18, marginTop: -9 },
-  grow: { flex: 1 },
-  bodyText: { color: appColor('#7A8D99', 'text'), fontSize: 12 },
-  loading: { alignItems: 'center', padding: 35, gap: 10 },
-  examCard: { flexDirection: 'row', alignItems: 'center', gap: 10, padding: 12, backgroundColor: appColor('#EDF7FA', 'background'), borderRadius: 15, borderWidth: 1, borderColor: appColor('#DDEEF3', 'border') },
-  examIcon: { width: 35, height: 35, borderRadius: 11, alignItems: 'center', justifyContent: 'center', backgroundColor: appColor('#FFFFFF', 'background') },
-  examTitle: { color: appColor('#294D60', 'text'), fontSize: 12, fontWeight: '800' },
-  examText: { color: appColor('#668495', 'text'), fontSize: 10, marginTop: 3 },
-  scoreCard: { gap: 10, padding: 15, borderRadius: 18, backgroundColor: appColor('#FFFFFF', 'background'), borderWidth: 1, borderColor: appColor('#E6EDF1', 'border'), ...cardShadow },
-  scoreHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
-  scoreCaption: { color: appColor('#80919C', 'text'), fontSize: 10, marginTop: 3 },
-  scoreValue: { color: appColor('#3281A0', 'text'), fontSize: 25, fontWeight: '800' },
-  progressTrack: { height: 8, backgroundColor: appColor('#E5EDF1', 'background'), borderRadius: 10, overflow: 'hidden' },
-  progressFill: { height: '100%', backgroundColor: '#45A1C3', borderRadius: 10 },
-  footnote: { color: appColor('#8797A0', 'text'), fontSize: 9, lineHeight: 14 },
-  metricsGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
-  metricCard: { width: '48%', flexGrow: 1, padding: 11, borderRadius: 15, backgroundColor: appColor('#FFFFFF', 'background'), borderWidth: 1, borderColor: appColor('#E6EDF1', 'border'), ...cardShadow },
-  metricIcon: { width: 29, height: 29, alignItems: 'center', justifyContent: 'center', borderRadius: 9, backgroundColor: appColor('#EEF7FA', 'background'), marginBottom: 5 },
-  metricLabel: { color: appColor('#7A8D99', 'text'), fontSize: 9, fontWeight: '800' },
-  metricValue: { color: appColor('#17324D', 'text'), fontSize: 19, fontWeight: '800', marginTop: 2 },
-  metricDetail: { color: appColor('#83939D', 'text'), fontSize: 9, lineHeight: 13, marginTop: 3 },
-  responseCard: { gap: 12, padding: 14, borderRadius: 18, backgroundColor: appColor('#FFFFFF', 'background'), borderWidth: 1, borderColor: appColor('#E6EDF1', 'border'), ...cardShadow },
-  sectionHeading: { flexDirection: 'row', alignItems: 'center', gap: 9 },
-  sectionIcon: { width: 34, height: 34, alignItems: 'center', justifyContent: 'center', backgroundColor: appColor('#EFF7FA', 'background'), borderRadius: 11 },
-  sectionTitle: { color: appColor('#17324D', 'text'), fontSize: 14, fontWeight: '800' },
-  sectionSub: { color: appColor('#7B8D99', 'text'), fontSize: 10, lineHeight: 15, marginTop: 3 },
-  resultRow: { flexDirection: 'row', gap: 7 },
-  resultTile: { flex: 1, minHeight: 58, alignItems: 'center', justifyContent: 'center', borderRadius: 12, backgroundColor: appColor('#F5F9FB', 'background') },
-  resultValue: { color: appColor('#17324D', 'text'), fontSize: 18, fontWeight: '800' },
-  resultLabel: { color: appColor('#81919B', 'text'), fontSize: 8, fontWeight: '700', marginTop: 3, textAlign: 'center' },
-  troubledRow: { gap: 4, paddingVertical: 9, borderTopWidth: 1, borderTopColor: appColor('#EDF1F3', 'border') },
-  troubledText: { color: appColor('#29495D', 'text'), fontSize: 11, lineHeight: 17, fontWeight: '600' },
-  troubledCount: { color: appColor('#8A7070', 'text'), fontSize: 9 },
-  secondaryButton: { flexDirection: 'row', minHeight: 40, alignItems: 'center', justifyContent: 'center', gap: 7, borderRadius: 12, borderWidth: 1, borderColor: appColor('#DCE8ED', 'border'), backgroundColor: appColor('#F8FBFC', 'background') },
-  secondaryButtonText: { color: appColor('#337E9D', 'text'), fontSize: 11, fontWeight: '800' },
-  aiCard: { gap: 11, padding: 14, borderRadius: 18, backgroundColor: appColor('#F0F8FB', 'background'), borderWidth: 1, borderColor: appColor('#DDEEF4', 'border') },
-  aiIcon: { width: 34, height: 34, alignItems: 'center', justifyContent: 'center', borderRadius: 11, backgroundColor: appColor('#FFFFFF', 'background') },
-  aiInsight: { gap: 8, padding: 12, borderRadius: 13, backgroundColor: appColor('#FFFFFF', 'background') },
-  aiOverview: { color: appColor('#36566A', 'text'), fontSize: 12, lineHeight: 18 },
-  nextStepLabel: { color: appColor('#81939E', 'text'), fontSize: 9, fontWeight: '800', letterSpacing: 0.6, marginTop: 3 },
-  aiNextStep: { color: appColor('#254C60', 'text'), fontSize: 12, fontWeight: '700', lineHeight: 18 },
-  aiButton: { minHeight: 43, borderRadius: 13, alignItems: 'center', justifyContent: 'center', flexDirection: 'row', gap: 8, backgroundColor: '#328FB5' },
-  aiButtonText: { color: '#FFFFFF', fontSize: 11, fontWeight: '800' },
-  errorBox: { padding: 10, borderRadius: 11, backgroundColor: appColor('#FFF2F0', 'background') },
-  errorText: { color: appColor('#9B3C34', 'text'), fontSize: 10, lineHeight: 15 },
-  retryText: { color: appColor('#327E9D', 'text'), fontSize: 10, fontWeight: '800', marginTop: 5 },
-  historyCard: { gap: 8, padding: 14, borderRadius: 18, backgroundColor: appColor('#FFFFFF', 'background'), borderWidth: 1, borderColor: appColor('#E6EDF1', 'border'), ...cardShadow },
-  historyRow: { flexDirection: 'row', alignItems: 'center', gap: 9, paddingVertical: 6, borderTopWidth: 1, borderTopColor: appColor('#EDF1F3', 'border') },
-  historyIcon: { width: 29, height: 29, alignItems: 'center', justifyContent: 'center', borderRadius: 9, backgroundColor: appColor('#F0F7F9', 'background') },
-  historyTitle: { color: appColor('#29495D', 'text'), fontSize: 11, fontWeight: '700' },
-  historyDetail: { color: appColor('#83939D', 'text'), fontSize: 9, marginTop: 2 },
-  historyDate: { color: appColor('#8A9AA3', 'text'), fontSize: 9 },
-  emptyHistory: { padding: 12, borderRadius: 12, backgroundColor: appColor('#F6F9FA', 'background') },
-  primaryButton: { flexDirection: 'row', minHeight: 46, alignItems: 'center', justifyContent: 'center', gap: 8, borderRadius: 13, backgroundColor: '#328FB5' },
-  primaryButtonText: { color: '#FFFFFF', fontSize: 12, fontWeight: '800' },
-  disabled: { opacity: 0.6 },
-  pressed: { opacity: 0.82 },
+  state: { alignItems: 'center', paddingVertical: 60 },
+  title: { color: ink.primary, fontSize: 28, fontWeight: '800', letterSpacing: -0.4 },
+  subtitle: { color: ink.secondary, fontSize: 14, marginTop: 2 },
+  percent: { color: ink.primary, fontSize: 20, fontWeight: '800' },
+  fading: { color: appColor('#9A6530', 'text'), fontSize: 12, fontWeight: '600', marginTop: -6 },
+  buttonRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8 },
+  list: { gap: 0, paddingVertical: 4 },
+  divider: { borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: appColor('#D8E6EC', 'border') },
+  part: { flexDirection: 'row', alignItems: 'center', gap: 12, paddingVertical: 12 },
+  partTop: { flexDirection: 'row', alignItems: 'center' },
+  partValue: { color: ink.primary, fontSize: 14, fontWeight: '800' },
+  partBar: { marginVertical: 6 },
+  rowTitle: { color: ink.primary, fontSize: 15, fontWeight: '700' },
+  insight: { gap: 6 },
+  eyebrow: { color: ink.muted, fontSize: 10, fontWeight: '800', letterSpacing: 0.8, textTransform: 'uppercase', marginTop: 4 },
+  nextStep: { color: ink.primary, fontSize: 14, fontWeight: '700', lineHeight: 20 },
+  question: { gap: 4, paddingVertical: 11 },
+  questionText: { color: ink.primary, fontSize: 14, fontWeight: '600', lineHeight: 20 },
+  history: { flexDirection: 'row', alignItems: 'center', gap: 12, paddingVertical: 11 },
 });

@@ -61,7 +61,13 @@ export type StudyIconName =
   | 'eye'
   | 'flask'
   | 'stethoscope'
-  | 'trophy';
+  | 'trophy'
+  | 'shieldLock'
+  | 'heartPulse'
+  | 'database'
+  | 'warning'
+  | 'checkShield'
+  | 'phone';
 
 const SYMBOLS: Record<StudyIconName, NonNullable<SymbolViewProps['name']>> = {
   back: { ios: 'chevron.left', android: 'arrow_back', web: 'arrow_back' },
@@ -123,6 +129,12 @@ const SYMBOLS: Record<StudyIconName, NonNullable<SymbolViewProps['name']>> = {
   flask: { ios: 'testtube.2', android: 'science', web: 'science' },
   stethoscope: { ios: 'stethoscope', android: 'stethoscope', web: 'stethoscope' },
   trophy: { ios: 'trophy', android: 'emoji_events', web: 'emoji_events' },
+  shieldLock: { ios: 'lock.shield', android: 'shield_lock', web: 'shield_lock' },
+  heartPulse: { ios: 'waveform.path.ecg', android: 'monitor_heart', web: 'monitor_heart' },
+  database: { ios: 'cylinder.split.1x2', android: 'database', web: 'database' },
+  warning: { ios: 'exclamationmark.triangle', android: 'warning', web: 'warning' },
+  checkShield: { ios: 'checkmark.shield', android: 'verified_user', web: 'verified_user' },
+  phone: { ios: 'iphone', android: 'smartphone', web: 'smartphone' },
 };
 
 export function StudyIcon({ name, size = 22, color = appColor('#327E9D', 'text') }: { name: StudyIconName; size?: number; color?: ColorValue }) {

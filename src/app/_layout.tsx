@@ -27,6 +27,8 @@ function AppNavigator() {
   return (
     <Stack>
       <Stack.Screen name="index" options={{ headerShown: false }} />
+      {/* Privacy, health disclaimer and terms can be read before signing in. */}
+      <Stack.Screen name="legal" options={{ headerShown: false }} />
       <Stack.Protected guard={!session}>
         <Stack.Screen name="welcome" options={{ headerShown: false, gestureEnabled: false }} />
       </Stack.Protected>

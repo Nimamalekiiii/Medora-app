@@ -1,4 +1,5 @@
 import { BackLink } from '@/components/back-link';
+import { cardShadow } from '@/components/gloss';
 import { LocalizedText as Text } from '@/components/localized-text';
 import { StudyIcon } from '@/components/study-icon';
 import { appColor } from '@/constants/adaptive-color';
@@ -13,6 +14,8 @@ import * as Sharing from 'expo-sharing';
 import { createStudyDataBackup, inspectStudyDataBackup, restorePreviousStudyDataBackup, restoreStudyDataBackup, type StudyDataBackupSummary } from '../../services/storage';
 import PullToRefreshScrollView from '../../components/pull-to-refresh-scroll-view';
 import { useAuth } from '../../services/auth-context';
+import { useAppSettings } from '../../services/app-settings-context';
+import { tr } from '../../services/localization';
 import {
   getCloudSyncSummary,
   getCurrentSession,
@@ -36,6 +39,8 @@ type CloudSummary = {
 
 export default function SettingsScreen() {
   const router = useRouter();
+  const { preferences } = useAppSettings();
+  const tx = (text: string) => tr(text, preferences.language);
   const { session } = useAuth();
   const [restoreVisible, setRestoreVisible] = useState(false);
   const [backupText, setBackupText] = useState('');
@@ -82,7 +87,7 @@ export default function SettingsScreen() {
       file.write(JSON.stringify(backup, null, 2));
       await Sharing.shareAsync(file.uri, { mimeType: 'application/json', dialogTitle: 'Save or share your Medora backup', UTI: 'public.json' });
     } catch {
-      Alert.alert('Backup failed', 'Medora could not prepare the backup. Your saved study data was not changed.');
+      Alert.alert(tx('Backup failed'), tx('Medora could not prepare the backup. Your saved study data was not changed.'));
     } finally { setBusy(false); }
   }
 
@@ -105,7 +110,7 @@ export default function SettingsScreen() {
       setManualRestoreVisible(false);
       setRestoreVisible(true);
     } catch (error) {
-      Alert.alert('Could not open this backup', error instanceof Error ? error.message : 'Choose a valid Medora JSON backup file.');
+      Alert.alert(tx('Could not open this backup'), error instanceof Error ? tx(error.message) : tx('Choose a valid Medora JSON backup file.'));
     }
   }
 
@@ -130,18 +135,18 @@ export default function SettingsScreen() {
       await restoreStudyDataBackup(backupText);
       closeRestoreModal();
       await refreshCloudState();
-      Alert.alert('Backup restored', 'Your study data has been restored. Medora saved what was on this device first, so you can undo this restore from Settings → Recovery options.');
+      Alert.alert(tx('Backup restored'), tx('Your study data has been restored. Medora saved what was on this device first, so you can undo this restore from Settings → Recovery options.'));
     } catch (error) {
-      Alert.alert('Could not restore backup', error instanceof Error ? error.message : 'Check that this is a Medora backup.');
+      Alert.alert(tx('Could not restore backup'), error instanceof Error ? tx(error.message) : tx('Check that this is a Medora backup.'));
     } finally { setBusy(false); }
   }
 
   function confirmRestoreBackup() {
     if (!backupSummary) return;
     const details = `${backupSummary.subjectCount} subjects · ${backupSummary.topicCount} topics · ${backupSummary.flashcardCount} flashcards · ${backupSummary.studySessionCount} study sessions · ${backupSummary.quizResultCount} quiz results`;
-    Alert.alert('Restore this backup?', `${details}\n\nThis replaces the study data on this device. Medora first saves a recovery copy of what is here now, which you can restore from Settings → Recovery options.`, [
-      { text: 'Cancel', style: 'cancel' },
-      { text: 'Restore backup', style: 'destructive', onPress: () => { void restoreBackup(); } },
+    Alert.alert(tx('Restore this backup?'), `${details}\n\nThis replaces the study data on this device. Medora first saves a recovery copy of what is here now, which you can restore from Settings → Recovery options.`, [
+      { text: tx('Cancel'), style: 'cancel' },
+      { text: tx('Restore backup'), style: 'destructive', onPress: () => { void restoreBackup(); } },
     ]);
   }
 
@@ -149,36 +154,36 @@ export default function SettingsScreen() {
     setBusy(true);
     try {
       const restored = await restorePreviousStudyDataBackup();
-      Alert.alert(restored ? 'Previous data restored' : 'No recovery copy', restored ? 'The data saved before the last restore or deletion is back.' : 'There is no recovery copy on this device yet.');
+      Alert.alert(restored ? tx('Previous data restored') : tx('No recovery copy'), restored ? tx('The data saved before the last restore or deletion is back.') : tx('There is no recovery copy on this device yet.'));
     } catch {
-      Alert.alert('Could not restore', 'The recovery copy could not be read.');
+      Alert.alert(tx('Could not restore'), tx('The recovery copy could not be read.'));
     } finally { setBusy(false); }
   }
 
   async function saveAccountEmail() {
     const auth = getSupabaseAuthClient();
     const nextEmail = emailDraft.trim().toLowerCase();
-    if (!auth) return Alert.alert('Sign in required', 'Please sign in again and retry.');
-    if (!/^\S+@\S+\.\S+$/.test(nextEmail)) return Alert.alert('Check the email', 'Enter a valid email address.');
+    if (!auth) return Alert.alert(tx('Sign in required'), tx('Please sign in again and retry.'));
+    if (!/^\S+@\S+\.\S+$/.test(nextEmail)) return Alert.alert(tx('Check the email'), tx('Enter a valid email address.'));
     if (nextEmail === session?.user.email?.toLowerCase()) return setEmailVisible(false);
     setBusy(true);
     try {
       const { error } = await auth.updateUser({ email: nextEmail });
       if (error) throw error;
       setEmailVisible(false);
-      Alert.alert('Confirm your new email', 'You may get a confirmation link before this becomes the sign-in email. Your current address stays active until the change is confirmed.');
+      Alert.alert(tx('Confirm your new email'), tx('You may get a confirmation link before this becomes the sign-in email. Your current address stays active until the change is confirmed.'));
     } catch (error) {
-      Alert.alert('Could not update email', error instanceof Error ? error.message : 'Check your connection and try again.');
+      Alert.alert(tx('Could not update email'), error instanceof Error ? tx(error.message) : tx('Check your connection and try again.'));
     } finally { setBusy(false); }
   }
 
   async function changeAccountPassword() {
     const auth = getSupabaseAuthClient();
     const email = session?.user.email;
-    if (!auth || !email) return Alert.alert('Sign in required', 'Please sign in again and retry.');
-    if (!currentPassword) return Alert.alert('Enter your current password', 'We need it to confirm this account belongs to you.');
-    if (newPassword.length < 8) return Alert.alert('Password is too short', 'Use at least 8 characters.');
-    if (newPassword !== confirmNewPassword) return Alert.alert('Passwords do not match', 'Enter the new password the same way in both fields.');
+    if (!auth || !email) return Alert.alert(tx('Sign in required'), tx('Please sign in again and retry.'));
+    if (!currentPassword) return Alert.alert(tx('Enter your current password'), tx('We need it to confirm this account belongs to you.'));
+    if (newPassword.length < 8) return Alert.alert(tx('Password is too short'), tx('Use at least 8 characters.'));
+    if (newPassword !== confirmNewPassword) return Alert.alert(tx('Passwords do not match'), tx('Enter the new password the same way in both fields.'));
 
     setBusy(true);
     try {
@@ -190,19 +195,19 @@ export default function SettingsScreen() {
       setCurrentPassword('');
       setNewPassword('');
       setConfirmNewPassword('');
-      Alert.alert('Password changed', 'Your Medora sign-in password has been updated.');
+      Alert.alert(tx('Password changed'), tx('Your Medora sign-in password has been updated.'));
     } catch (error) {
-      Alert.alert('Could not change password', error instanceof Error ? error.message : 'Check your connection and try again.');
+      Alert.alert(tx('Could not change password'), error instanceof Error ? tx(error.message) : tx('Check your connection and try again.'));
     } finally { setBusy(false); }
   }
 
   function switchCloudAccount() {
-    Alert.alert('Switch account?', 'This device will disconnect from the current account, but its cloud copy will remain there. Local study data stays on this device. When you sign in to another account, Medora will ask which copy to keep before syncing.', [
-      { text: 'Cancel', style: 'cancel' },
-      { text: 'Disconnect and sign out', style: 'destructive', onPress: () => {
+    Alert.alert(tx('Switch account?'), tx('This device will disconnect from the current account, but its cloud copy will remain there. Local study data stays on this device. When you sign in to another account, Medora will ask which copy to keep before syncing.'), [
+      { text: tx('Cancel'), style: 'cancel' },
+      { text: tx('Disconnect and sign out'), style: 'destructive', onPress: () => {
         setBusy(true);
         void disconnectCloudAccount().then(refreshCloudState).catch((error) => {
-          Alert.alert('Could not switch account', error instanceof Error ? error.message : 'Please try again.');
+          Alert.alert(tx('Could not switch account'), error instanceof Error ? tx(error.message) : tx('Please try again.'));
         }).finally(() => setBusy(false));
       } },
     ]);
@@ -213,30 +218,30 @@ export default function SettingsScreen() {
     try {
       const result = await syncStudyData(mode);
       if (result === 'local-only') {
-        Alert.alert('Study data found on this device', 'This account has no cloud copy yet. Do you want to upload the study data already on this device to this account?', [
-          { text: 'Cancel', style: 'cancel' },
-          { text: 'Upload this device', onPress: () => { void syncCloud('push'); } },
+        Alert.alert(tx('Study data found on this device'), tx('This account has no cloud copy yet. Do you want to upload the study data already on this device to this account?'), [
+          { text: tx('Cancel'), style: 'cancel' },
+          { text: tx('Upload this device'), onPress: () => { void syncCloud('push'); } },
         ]);
       } else if (result === 'conflict') {
-        Alert.alert('Choose which copy to keep', 'There is study data on both this device and in your account, or another device has changed the cloud copy. Nothing was overwritten.', [
-          { text: 'Cancel', style: 'cancel' },
-          { text: 'Restore cloud copy', onPress: () => { void syncCloud('pull'); } },
-          { text: 'Replace cloud copy', style: 'destructive', onPress: () => { void syncCloud('push'); } },
+        Alert.alert(tx('Choose which copy to keep'), tx('There is study data on both this device and in your account, or another device has changed the cloud copy. Nothing was overwritten.'), [
+          { text: tx('Cancel'), style: 'cancel' },
+          { text: tx('Restore cloud copy'), onPress: () => { void syncCloud('pull'); } },
+          { text: tx('Replace cloud copy'), style: 'destructive', onPress: () => { void syncCloud('push'); } },
         ]);
       } else if (result === 'no-cloud-backup') {
-        Alert.alert('No cloud copy yet', 'Sync this device first to create the cloud backup.');
+        Alert.alert(tx('No cloud copy yet'), tx('Sync this device first to create the cloud backup.'));
       } else if (result === 'not-configured') {
-        Alert.alert('Cloud backup is not configured', 'Cloud backup is not available in this version of the app.');
+        Alert.alert(tx('Cloud backup is not configured'), tx('Cloud backup is not available in this version of the app.'));
       } else if (result === 'downloaded') {
-        Alert.alert('Cloud copy restored', 'The cloud study data is now on this device. A recovery copy of the previous local data was saved.');
+        Alert.alert(tx('Cloud copy restored'), tx('The cloud study data is now on this device. A recovery copy of the previous local data was saved.'));
       } else if (result === 'synced') {
-        Alert.alert('Cloud backup updated', 'Your study data has been saved to your account.');
+        Alert.alert(tx('Cloud backup updated'), tx('Your study data has been saved to your account.'));
       } else if (result === 'up-to-date') {
-        Alert.alert('Everything is up to date', 'Your local and cloud study data match.');
+        Alert.alert(tx('Everything is up to date'), tx('Your local and cloud study data match.'));
       }
       await refreshCloudState();
     } catch (error) {
-      Alert.alert('Cloud sync failed', error instanceof Error ? error.message : 'Your local data is still saved on this device. Try again when you are online.');
+      Alert.alert(tx('Cloud sync failed'), error instanceof Error ? tx(error.message) : tx('Your local data is still saved on this device. Try again when you are online.'));
     } finally { setBusy(false); }
   }
 
@@ -244,18 +249,17 @@ export default function SettingsScreen() {
     setBusy(true);
     try {
       const result = await restorePreviousCloudBackup();
-      Alert.alert(result === 'synced' ? 'Previous cloud copy restored' : 'No previous cloud copy', result === 'synced' ? 'The version from before the last replacement is back in your account. The version it replaced can now be restored from Settings too.' : 'There is no saved cloud recovery copy for this account.');
+      Alert.alert(result === 'synced' ? tx('Previous cloud copy restored') : tx('No previous cloud copy'), result === 'synced' ? tx('The version from before the last replacement is back in your account. The version it replaced can now be restored from Settings too.') : tx('There is no saved cloud recovery copy for this account.'));
       await refreshCloudState();
     } catch (error) {
-      Alert.alert('Could not restore cloud copy', error instanceof Error ? error.message : 'Please try again.');
+      Alert.alert(tx('Could not restore cloud copy'), error instanceof Error ? tx(error.message) : tx('Please try again.'));
     } finally { setBusy(false); }
   }
 
   return <SafeAreaView style={styles.screen}>
     <PullToRefreshScrollView contentContainerStyle={styles.content} onRefresh={refreshCloudState}>
       <View style={styles.settingsHeader}>
-        <BackLink label="Profile" />
-        <Text style={styles.eyebrow}>SETTINGS</Text>
+        <BackLink label="Back" />
         <Text style={styles.title}>Data & account</Text>
         <Text style={styles.subtitle}>Backups, cloud sync and account access.</Text>
       </View>
@@ -281,9 +285,9 @@ export default function SettingsScreen() {
             <Text style={styles.disclosureText}>More sync options</Text><Text style={styles.disclosureChevron}>{cloudOptionsExpanded ? '−' : '+'}</Text>
           </Pressable>
           {cloudOptionsExpanded && <>
-            <Pressable accessibilityRole="button" style={styles.action} disabled={busy || accountSummary.accountMismatch} onPress={() => Alert.alert('Restore cloud copy?', 'The cloud copy will replace the study data on this device. A recovery copy will be saved first.', [{ text: 'Cancel', style: 'cancel' }, { text: 'Restore cloud', style: 'destructive', onPress: () => { void syncCloud('pull'); } }])}><View style={styles.iconSlot}><StudyIcon name="download" size={20} /></View><View style={{ flex: 1 }}><Text style={styles.actionTitle}>Restore cloud copy</Text><Text style={styles.copy}>Replace local data after creating a recovery copy</Text></View><StudyIcon name="chevron" size={13} color={appColor('#9AADB8', 'text')} /></Pressable>
-            <Pressable accessibilityRole="button" style={styles.action} disabled={busy || accountSummary.accountMismatch} onPress={() => Alert.alert('Replace cloud copy?', 'This replaces the existing cloud backup with the data on this device. Continue only if this is the copy you want to keep.', [{ text: 'Cancel', style: 'cancel' }, { text: 'Replace cloud', style: 'destructive', onPress: () => { void syncCloud('push'); } }])}><View style={styles.iconSlot}><StudyIcon name="upload" size={20} /></View><View style={{ flex: 1 }}><Text style={styles.actionTitle}>Replace cloud with this device</Text><Text style={styles.copy}>Use this device as the copy to keep</Text></View><StudyIcon name="chevron" size={13} color={appColor('#9AADB8', 'text')} /></Pressable>
-            {accountSummary.hasCloudRecovery && !accountSummary.accountMismatch && <Pressable accessibilityRole="button" style={styles.action} disabled={busy} onPress={() => Alert.alert('Restore the previous cloud copy?', 'The current cloud version will be saved as the recovery copy.', [{ text: 'Cancel', style: 'cancel' }, { text: 'Restore previous', style: 'destructive', onPress: () => { void undoCloudReplacement(); } }])}><View style={styles.iconSlot}><StudyIcon name="undo" size={20} /></View><View style={{ flex: 1 }}><Text style={styles.actionTitle}>Undo last cloud replacement</Text><Text style={styles.copy}>Restore the cloud version saved before replacing it</Text></View><StudyIcon name="chevron" size={13} color={appColor('#9AADB8', 'text')} /></Pressable>}
+            <Pressable accessibilityRole="button" style={styles.action} disabled={busy || accountSummary.accountMismatch} onPress={() => Alert.alert(tx('Restore cloud copy?'), tx('The cloud copy will replace the study data on this device. A recovery copy will be saved first.'), [{ text: tx('Cancel'), style: 'cancel' }, { text: tx('Restore cloud'), style: 'destructive', onPress: () => { void syncCloud('pull'); } }])}><View style={styles.iconSlot}><StudyIcon name="download" size={20} /></View><View style={{ flex: 1 }}><Text style={styles.actionTitle}>Restore cloud copy</Text><Text style={styles.copy}>Replace local data after creating a recovery copy</Text></View><StudyIcon name="chevron" size={13} color={appColor('#9AADB8', 'text')} /></Pressable>
+            <Pressable accessibilityRole="button" style={styles.action} disabled={busy || accountSummary.accountMismatch} onPress={() => Alert.alert(tx('Replace cloud copy?'), tx('This replaces the existing cloud backup with the data on this device. Continue only if this is the copy you want to keep.'), [{ text: tx('Cancel'), style: 'cancel' }, { text: tx('Replace cloud'), style: 'destructive', onPress: () => { void syncCloud('push'); } }])}><View style={styles.iconSlot}><StudyIcon name="upload" size={20} /></View><View style={{ flex: 1 }}><Text style={styles.actionTitle}>Replace cloud with this device</Text><Text style={styles.copy}>Use this device as the copy to keep</Text></View><StudyIcon name="chevron" size={13} color={appColor('#9AADB8', 'text')} /></Pressable>
+            {accountSummary.hasCloudRecovery && !accountSummary.accountMismatch && <Pressable accessibilityRole="button" style={styles.action} disabled={busy} onPress={() => Alert.alert(tx('Restore the previous cloud copy?'), tx('The current cloud version will be saved as the recovery copy.'), [{ text: tx('Cancel'), style: 'cancel' }, { text: tx('Restore previous'), style: 'destructive', onPress: () => { void undoCloudReplacement(); } }])}><View style={styles.iconSlot}><StudyIcon name="undo" size={20} /></View><View style={{ flex: 1 }}><Text style={styles.actionTitle}>Undo last cloud replacement</Text><Text style={styles.copy}>Restore the cloud version saved before replacing it</Text></View><StudyIcon name="chevron" size={13} color={appColor('#9AADB8', 'text')} /></Pressable>}
             <Pressable accessibilityRole="button" style={styles.action} disabled={busy} onPress={switchCloudAccount}><View style={styles.iconSlot}><StudyIcon name="swap" size={20} /></View><View style={{ flex: 1 }}><Text style={styles.actionTitle}>Switch account</Text><Text style={styles.copy}>Link this device to a different cloud account</Text></View><StudyIcon name="chevron" size={13} color={appColor('#9AADB8', 'text')} /></Pressable>
           </>}
         </> : <View style={styles.info}><View style={styles.iconSlot}><StudyIcon name="cloud" size={22} /></View><View style={{ flex: 1 }}><Text style={styles.infoTitle}>No account signed in</Text><Text style={styles.copy}>Sign in from the welcome screen to sync your study data.</Text></View></View>}
@@ -365,7 +369,7 @@ export default function SettingsScreen() {
 const styles = StyleSheet.create({
   screen: { flex: 1, backgroundColor: appColor('#F5FAFC', 'background') }, content: { padding: 20, paddingBottom: 40 },
   settingsHeader: { marginBottom: 4 }, backButton: { alignSelf: 'flex-start', paddingVertical: 8, paddingRight: 12 }, backButtonText: { color: appColor('#327E9D', 'text'), fontSize: 15, fontWeight: '700' },
-  groupCard: { backgroundColor: appColor('#FFFFFF', 'background'), borderRadius: 20, padding: 16, marginBottom: 14, borderWidth: 1, borderColor: appColor('#E7F0F4', 'border') },
+  groupCard: { backgroundColor: appColor('#FFFFFF', 'background'), borderRadius: 22, padding: 16, marginBottom: 14, borderWidth: 1, borderColor: appColor('#E7F0F4', 'border'), ...cardShadow },
   groupTitle: { color: appColor('#17324D', 'text'), fontSize: 17, fontWeight: '800' },
   groupDescription: { color: appColor('#718493', 'text'), fontSize: 12, lineHeight: 18, marginTop: 5, marginBottom: 12 },
   groupDivider: { height: 1, backgroundColor: appColor('#EDF3F6', 'background'), marginVertical: 14 },
